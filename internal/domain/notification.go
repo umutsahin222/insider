@@ -19,7 +19,9 @@ type Notification struct {
 	Priority       Priority
 	Status         Status
 
-	ScheduledAt   *time.Time
+	ScheduledAt *time.Time
+	// NextAttemptAt is when the notification becomes claimable. Stores persist it using the
+	// database clock (max(scheduled_at, now())); the value set here is the API's estimate.
 	NextAttemptAt time.Time
 	Attempts      int
 	MaxAttempts   int
@@ -55,6 +57,15 @@ type DeliveryAttempt struct {
 	Error          *string
 	Duration       time.Duration
 	CreatedAt      time.Time
+}
+
+// ProviderReply is the external provider's answer to one send request. Interpreting it
+// (success / retryable / permanent) is a delivery-policy decision, not the client's.
+type ProviderReply struct {
+	StatusCode int
+	MessageID  string
+	// RetryAfter is the provider's requested delay (Retry-After header), zero if absent.
+	RetryAfter time.Duration
 }
 
 // Template is a reusable message body with text/template placeholders.

@@ -71,6 +71,9 @@ func traceParam(tc map[string]string) any {
 	return tc
 }
 
+// next_attempt_at is computed by the database (GREATEST(scheduled_at, now())) so the queue
+// runs on a single clock; see queue.go.
+
 // CreateNotification inserts n. If n carries an idempotency key that already exists,
 // nothing is inserted and the existing notification is returned with created=false.
 // The check is race-free: concurrent requests with the same key resolve through the
@@ -79,11 +82,11 @@ func (s *Store) CreateNotification(ctx context.Context, n domain.Notification) (
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO notifications (id, batch_id, idempotency_key, channel, recipient, content, template_id,
 			priority, scheduled_at, next_attempt_at, max_attempts, correlation_id, trace_context)
-		VALUES ($1, $2, $3, $4::text::notification_channel, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		VALUES ($1, $2, $3, $4::text::notification_channel, $5, $6, $7, $8, $9, GREATEST($9::timestamptz, now()), $10, $11, $12)
 		ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 		RETURNING `+notificationColumns,
 		n.ID, n.BatchID, n.IdempotencyKey, string(n.Channel), n.Recipient, n.Content, n.TemplateID,
-		int16(n.Priority), n.ScheduledAt, n.NextAttemptAt, n.MaxAttempts, n.CorrelationID, traceParam(n.TraceContext))
+		int16(n.Priority), n.ScheduledAt, n.MaxAttempts, n.CorrelationID, traceParam(n.TraceContext))
 
 	created, err := scanNotification(row)
 	if err == nil {
@@ -113,7 +116,7 @@ func (s *Store) CreateBatch(ctx context.Context, ns []domain.Notification) error
 	channels, recipients, contents, corrIDs := make([]string, size), make([]string, size), make([]string, size), make([]string, size)
 	idemKeys, templateIDs := make([]*string, size), make([]*string, size)
 	priorities, maxAttempts := make([]int16, size), make([]int32, size)
-	scheduled, nextAttempt := make([]*time.Time, size), make([]time.Time, size)
+	scheduled := make([]*time.Time, size)
 	for i, n := range ns {
 		ids[i] = n.ID.String()
 		if n.BatchID != nil {
@@ -125,20 +128,20 @@ func (s *Store) CreateBatch(ctx context.Context, ns []domain.Notification) error
 			s := n.TemplateID.String()
 			templateIDs[i] = &s
 		}
-		priorities[i], scheduled[i], nextAttempt[i], maxAttempts[i] = int16(n.Priority), n.ScheduledAt, n.NextAttemptAt, int32(n.MaxAttempts)
+		priorities[i], scheduled[i], maxAttempts[i] = int16(n.Priority), n.ScheduledAt, int32(n.MaxAttempts)
 	}
 
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO notifications (id, batch_id, idempotency_key, channel, recipient, content, template_id,
 			priority, scheduled_at, next_attempt_at, max_attempts, correlation_id, trace_context)
 		SELECT u.id, NULLIF(u.batch_id, '')::uuid, u.idem, u.channel::notification_channel, u.recipient, u.content,
-			u.template_id, u.priority, u.scheduled_at, u.next_attempt_at, u.max_attempts, u.corr, $13::jsonb
+			u.template_id, u.priority, u.scheduled_at, GREATEST(u.scheduled_at, now()), u.max_attempts, u.corr, $12::jsonb
 		FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::uuid[],
-			$8::smallint[], $9::timestamptz[], $10::timestamptz[], $11::int[], $12::text[])
+			$8::smallint[], $9::timestamptz[], $10::int[], $11::text[])
 			AS u(id, batch_id, idem, channel, recipient, content, template_id, priority, scheduled_at,
-				next_attempt_at, max_attempts, corr)`,
+				max_attempts, corr)`,
 		ids, batchIDs, idemKeys, channels, recipients, contents, templateIDs,
-		priorities, scheduled, nextAttempt, maxAttempts, corrIDs, traceParam(ns[0].TraceContext))
+		priorities, scheduled, maxAttempts, corrIDs, traceParam(ns[0].TraceContext))
 
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "notifications_idempotency_key_uq" {

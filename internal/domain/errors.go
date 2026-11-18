@@ -12,6 +12,9 @@ var (
 	ErrNotFound   = errors.New("not found")
 	ErrConflict   = errors.New("conflict")
 	ErrValidation = errors.New("validation failed")
+	// ErrLeaseLost means a worker tried to finish an attempt it no longer owns: its lease
+	// expired and the notification was reaped (and possibly re-claimed) in the meantime.
+	ErrLeaseLost = errors.New("lease lost")
 )
 
 // Error is a sentinel-classified error whose message is safe to show to API clients.

@@ -1,0 +1,50 @@
+// Package domain holds the core notification model and its business rules.
+// It must not import any other package from this module.
+package domain
+
+import (
+	"errors"
+	"strings"
+)
+
+// Sentinel errors. Transport layers map these to protocol-specific codes in one place.
+var (
+	ErrNotFound   = errors.New("not found")
+	ErrConflict   = errors.New("conflict")
+	ErrValidation = errors.New("validation failed")
+)
+
+// FieldError describes a single invalid input field.
+// Field is a path such as "recipient" or "items[3].content".
+type FieldError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// ValidationError aggregates every problem found in an input so clients can fix them in one go.
+// errors.Is(err, ErrValidation) reports true for it.
+type ValidationError struct {
+	Errors []FieldError
+}
+
+func (e *ValidationError) Error() string {
+	parts := make([]string, len(e.Errors))
+	for i, fe := range e.Errors {
+		parts[i] = fe.Field + ": " + fe.Message
+	}
+	return "validation failed: " + strings.Join(parts, "; ")
+}
+
+func (e *ValidationError) Is(target error) bool { return target == ErrValidation }
+
+func (e *ValidationError) add(field, msg string) {
+	e.Errors = append(e.Errors, FieldError{Field: field, Message: msg})
+}
+
+// errOrNil returns e only if it holds at least one field error.
+func (e *ValidationError) errOrNil() error {
+	if len(e.Errors) == 0 {
+		return nil
+	}
+	return e
+}

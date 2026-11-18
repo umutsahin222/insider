@@ -16,10 +16,15 @@ servers:
   - url: http://localhost:8080
 tags:
   - name: notifications
+    description: Create, query, cancel and retry individual notifications.
   - name: batches
+    description: Track and cancel notifications created together.
   - name: templates
+    description: Reusable message bodies with variable substitution.
   - name: realtime
+    description: Live status updates over WebSocket.
   - name: ops
+    description: Health checks and metrics.
 
 paths:
   /v1/notifications:

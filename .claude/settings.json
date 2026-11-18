@@ -11,7 +11,10 @@
       "Bash(docker compose:*)",
       "Bash(git status:*)",
       "Bash(git diff:*)",
-      "Bash(git log:*)"
+      "Bash(git log:*)",
+      "Bash(golangci-lint:*)",
+      "Bash(docker run --rm -v * redocly/cli:1.25.11 lint *)",
+      "Bash(npx --yes @redocly/cli@1.25.11 lint *)"
     ]
   },
   "hooks": {

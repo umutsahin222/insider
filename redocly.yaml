@@ -1,0 +1,12 @@
+# OpenAPI lint config for `make lint-api`.
+extends:
+  - recommended
+
+rules:
+  # Authentication is out of scope for this assessment; in production it would be
+  # enforced at the API gateway. Re-enable once a security scheme is added.
+  security-defined: off
+  # Internal service, no published license.
+  info-license: off
+  # The only server is the local docker-compose URL.
+  no-server-example.com: off

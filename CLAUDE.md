@@ -26,7 +26,7 @@ Redis is used for the distributed rate limiter and status-event pub/sub. See `do
 - Wrap errors with `fmt.Errorf("doing x: %w", err)`; sentinel errors in `domain` (`ErrNotFound`, `ErrConflict`, ...) mapped to HTTP codes in one place.
 - Logging: `log/slog` JSON, always include `correlation_id` (and `notification_id` where relevant). No `fmt.Println`.
 - Schema changes only through new files in `migrations/` (never edit an applied migration).
-- `api/openapi.yaml` is the contract: update it in the same commit as any API change.
+- `api/openapi.yaml` is the contract: update it in the same commit as any API change and run `make lint-api`.
 
 ## Testing
 - `make test` runs everything (unit + integration with testcontainers; Docker required). `make test-unit` skips integration.
@@ -41,5 +41,5 @@ Redis is used for the distributed rate limiter and status-event pub/sub. See `do
 
 ## Commands
 - `make run` – `docker compose up --build`
-- `make test` / `make test-unit` / `make lint`
+- `make test` / `make test-unit` / `make lint` / `make lint-api` (OpenAPI, via Docker)
 - `make migrate-up` / `make migrate-down`

@@ -1,3 +1,3 @@
-module github.com/umutsahin222/notification-system
+module github.com/umutsahin222/insider
 
 go 1.27.4

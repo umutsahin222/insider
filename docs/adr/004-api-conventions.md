@@ -32,5 +32,6 @@ hard to change once clients depend on them.
 ## Consequences
 - Idempotency keys are not scoped per client; a multi-tenant version would add a tenant column to
   the unique index.
-- The idempotency check does not compare payloads; reusing a key with a different body returns the
-  original notification.
+- ~~The idempotency check does not compare payloads; reusing a key with a different body returns
+  the original notification.~~ Superseded by ADR-006: requests are fingerprinted, a reused key with
+  a different body is rejected with `422`, and batches accept their own `Idempotency-Key`.

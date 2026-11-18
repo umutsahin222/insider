@@ -14,6 +14,22 @@ var (
 	ErrValidation = errors.New("validation failed")
 )
 
+// Error is a sentinel-classified error whose message is safe to show to API clients.
+// errors.Is(err, ErrNotFound) etc. works through Unwrap.
+type Error struct {
+	Kind error
+	Msg  string
+}
+
+func (e *Error) Error() string { return e.Msg }
+func (e *Error) Unwrap() error { return e.Kind }
+
+// NotFound returns an ErrNotFound with a client-facing message.
+func NotFound(msg string) error { return &Error{Kind: ErrNotFound, Msg: msg} }
+
+// Conflict returns an ErrConflict with a client-facing message.
+func Conflict(msg string) error { return &Error{Kind: ErrConflict, Msg: msg} }
+
 // FieldError describes a single invalid input field.
 // Field is a path such as "recipient" or "items[3].content".
 type FieldError struct {

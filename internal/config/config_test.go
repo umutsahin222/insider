@@ -44,6 +44,32 @@ func TestLoadAPI_Overrides(t *testing.T) {
 	}
 }
 
+func TestLoadWorker(t *testing.T) {
+	cfg, err := loadWorker(lookupFrom(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 {
+		t.Errorf("unexpected defaults: %+v", cfg)
+	}
+
+	cfg, err = loadWorker(lookupFrom(map[string]string{"CHANNELS": "sms, push"}))
+	if err != nil || len(cfg.Channels) != 2 || cfg.Channels[1] != domain.ChannelPush {
+		t.Errorf("CHANNELS: %v, %v", cfg.Channels, err)
+	}
+
+	tests := map[string]map[string]string{
+		"unknown channel":                     {"CHANNELS": "sms,fax"},
+		"zero concurrency":                    {"WORKER_CONCURRENCY": "0"},
+		"lease shorter than a batch of sends": {"LEASE_DURATION": "10s", "PROVIDER_TIMEOUT": "5s", "CLAIM_BATCH_SIZE": "10"},
+	}
+	for name, env := range tests {
+		if _, err := loadWorker(lookupFrom(env)); err == nil {
+			t.Errorf("%s: expected error", name)
+		}
+	}
+}
+
 func TestLoadAPI_ReportsEveryInvalidVariable(t *testing.T) {
 	_, err := loadAPI(lookupFrom(map[string]string{
 		"SMS_MAX_LENGTH":   "lots",

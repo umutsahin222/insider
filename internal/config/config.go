@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/umutsahin222/insider/internal/domain"
@@ -58,6 +59,85 @@ func loadAPI(lookup func(string) (string, bool)) (API, error) {
 	return cfg, nil
 }
 
+// Worker is the configuration of cmd/worker.
+type Worker struct {
+	DatabaseURL     string
+	RedisURL        string
+	LogLevel        slog.Level
+	ShutdownTimeout time.Duration
+
+	ProviderURL     string
+	ProviderTimeout time.Duration
+
+	Channels       []domain.Channel
+	Concurrency    int
+	ClaimBatchSize int
+	Lease          time.Duration
+	PollInterval   time.Duration
+	ReaperInterval time.Duration
+
+	RateLimitPerSecond float64
+	RateLimitBurst     int
+
+	RetryBase time.Duration
+	RetryMax  time.Duration
+
+	BreakerFailures    int
+	BreakerOpenTimeout time.Duration
+}
+
+// LoadWorker reads the worker configuration from the environment.
+func LoadWorker() (Worker, error) {
+	return loadWorker(os.LookupEnv)
+}
+
+func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
+	e := env{lookup: lookup}
+	cfg := Worker{
+		DatabaseURL:     e.str("DATABASE_URL", "postgres://notify:notify@localhost:5432/notify?sslmode=disable"),
+		RedisURL:        e.str("REDIS_URL", "redis://localhost:6379/0"),
+		LogLevel:        e.level("LOG_LEVEL", slog.LevelInfo),
+		ShutdownTimeout: e.duration("SHUTDOWN_TIMEOUT", 30*time.Second),
+
+		ProviderURL:     e.str("PROVIDER_URL", "http://localhost:8090/send"),
+		ProviderTimeout: e.duration("PROVIDER_TIMEOUT", 5*time.Second),
+
+		Channels:       e.channels("CHANNELS", domain.Channels),
+		Concurrency:    e.int("WORKER_CONCURRENCY", 8),
+		ClaimBatchSize: e.int("CLAIM_BATCH_SIZE", 10),
+		Lease:          e.duration("LEASE_DURATION", 60*time.Second),
+		PollInterval:   e.duration("POLL_INTERVAL", 200*time.Millisecond),
+		ReaperInterval: e.duration("REAPER_INTERVAL", 10*time.Second),
+
+		RateLimitPerSecond: float64(e.int("RATE_LIMIT_PER_SECOND", 100)),
+		RateLimitBurst:     e.int("RATE_LIMIT_BURST", 1),
+
+		RetryBase: e.duration("RETRY_BASE", 2*time.Second),
+		RetryMax:  e.duration("RETRY_MAX", 5*time.Minute),
+
+		BreakerFailures:    e.int("BREAKER_FAILURES", 5),
+		BreakerOpenTimeout: e.duration("BREAKER_OPEN_TIMEOUT", 30*time.Second),
+	}
+	for name, v := range map[string]int{
+		"WORKER_CONCURRENCY": cfg.Concurrency, "CLAIM_BATCH_SIZE": cfg.ClaimBatchSize,
+		"RATE_LIMIT_PER_SECOND": int(cfg.RateLimitPerSecond), "RATE_LIMIT_BURST": cfg.RateLimitBurst,
+		"BREAKER_FAILURES": cfg.BreakerFailures,
+	} {
+		if v < 1 {
+			e.errs = append(e.errs, fmt.Errorf("%s must be positive", name))
+		}
+	}
+	// A lease shorter than the worst-case send would let the reaper hand live work to
+	// another worker and cause duplicate sends.
+	if cfg.Lease <= cfg.ProviderTimeout*time.Duration(max(cfg.ClaimBatchSize, 1)) {
+		e.errs = append(e.errs, errors.New("LEASE_DURATION must exceed PROVIDER_TIMEOUT × CLAIM_BATCH_SIZE"))
+	}
+	if err := errors.Join(e.errs...); err != nil {
+		return Worker{}, fmt.Errorf("loading config: %w", err)
+	}
+	return cfg, nil
+}
+
 // env collects parse errors so a misconfiguration reports every bad variable at once.
 type env struct {
 	lookup func(string) (string, bool)
@@ -95,6 +175,23 @@ func (e *env) duration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+func (e *env) channels(key string, def []domain.Channel) []domain.Channel {
+	v, ok := e.lookup(key)
+	if !ok || v == "" {
+		return def
+	}
+	var out []domain.Channel
+	for _, s := range strings.Split(v, ",") {
+		ch, err := domain.ParseChannel(strings.TrimSpace(s))
+		if err != nil {
+			e.errs = append(e.errs, fmt.Errorf("%s: %w", key, err))
+			continue
+		}
+		out = append(out, ch)
+	}
+	return out
 }
 
 func (e *env) level(key string, def slog.Level) slog.Level {

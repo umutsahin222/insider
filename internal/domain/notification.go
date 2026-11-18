@@ -32,6 +32,9 @@ type Notification struct {
 	CorrelationID     string
 	// TraceContext carries W3C trace headers (traceparent/tracestate) from the API to the worker.
 	TraceContext map[string]string
+	// RequestHash fingerprints the create request so a reused idempotency key with a
+	// different body can be rejected (ADR-006). Empty for rows created before it existed.
+	RequestHash string
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -101,10 +104,20 @@ func NewNotification(in CreateInput, rules Rules, now time.Time) (Notification, 
 	return n, nil
 }
 
+// Batch is a group of notifications created by one request. Its own idempotency key makes
+// the whole request safe to retry (ADR-006).
+type Batch struct {
+	ID             uuid.UUID
+	IdempotencyKey *string
+	RequestHash    string
+	Notifications  []Notification
+}
+
 // NewBatch validates every item and builds the notifications of one batch.
 // It is all-or-nothing: any invalid item rejects the whole batch, and every
 // problem is reported with its item index (e.g. "items[3].recipient").
-func NewBatch(items []CreateInput, rules Rules, now time.Time) (uuid.UUID, []Notification, error) {
+// idempotencyKey is the optional batch-level key ("" for none).
+func NewBatch(items []CreateInput, idempotencyKey string, rules Rules, now time.Time) (Batch, error) {
 	ve := &ValidationError{}
 	switch {
 	case len(items) == 0:
@@ -112,8 +125,11 @@ func NewBatch(items []CreateInput, rules Rules, now time.Time) (uuid.UUID, []Not
 	case len(items) > rules.MaxBatchSize:
 		ve.add("items", "must contain at most "+itoa(rules.MaxBatchSize)+" notifications")
 	}
+	if len(idempotencyKey) > rules.MaxIdempotencyKeyLength {
+		ve.add("idempotency_key", "must be at most "+itoa(rules.MaxIdempotencyKeyLength)+" bytes")
+	}
 	if err := ve.errOrNil(); err != nil {
-		return uuid.Nil, nil, err
+		return Batch{}, err
 	}
 
 	batchID := newID()
@@ -133,9 +149,13 @@ func NewBatch(items []CreateInput, rules Rules, now time.Time) (uuid.UUID, []Not
 		out = append(out, n)
 	}
 	if err := ve.errOrNil(); err != nil {
-		return uuid.Nil, nil, err
+		return Batch{}, err
 	}
-	return batchID, out, nil
+	b := Batch{ID: batchID, RequestHash: batchFingerprint(out), Notifications: out}
+	if idempotencyKey != "" {
+		b.IdempotencyKey = &idempotencyKey
+	}
+	return b, nil
 }
 
 func build(in CreateInput, rules Rules, now time.Time, prefix string, ve *ValidationError) Notification {
@@ -185,6 +205,7 @@ func build(in CreateInput, rules Rules, now time.Time, prefix string, ve *Valida
 		key := in.IdempotencyKey
 		n.IdempotencyKey = &key
 	}
+	n.RequestHash = notificationFingerprint(n)
 	return n
 }
 

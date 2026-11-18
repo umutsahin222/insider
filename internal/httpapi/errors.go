@@ -52,6 +52,8 @@ func (a *api) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		p.Status, p.Title, p.Detail = http.StatusNotFound, "Not found", de.Msg
 	case errors.As(err, &de) && errors.Is(err, domain.ErrConflict):
 		p.Status, p.Title, p.Detail = http.StatusConflict, "Conflict", de.Msg
+	case errors.As(err, &de) && errors.Is(err, domain.ErrIdempotencyMismatch):
+		p.Status, p.Title, p.Detail = http.StatusUnprocessableEntity, "Idempotency key reused", de.Msg
 	default:
 		a.log.ErrorContext(r.Context(), "request failed", "error", err, "method", r.Method, "path", r.URL.Path)
 		p.Status, p.Title = http.StatusInternalServerError, "Internal server error"

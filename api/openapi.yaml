@@ -36,7 +36,8 @@ paths:
         Validates and enqueues one notification. Supply either `content` or `template`.
 
         With an `Idempotency-Key` header, repeating the request returns the originally
-        created notification with `200 OK` instead of creating a duplicate.
+        created notification with `200 OK` instead of creating a duplicate. Reusing the key
+        with a different request body is rejected with `422` (see ADR-006).
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/CorrelationID'
@@ -84,7 +85,7 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
-        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '422': { $ref: '#/components/responses/ValidationFailedOrKeyReused' }
     get:
       tags: [notifications]
       operationId: listNotifications
@@ -131,9 +132,14 @@ paths:
       description: |
         All-or-nothing: the batch is validated as a whole and inserted in one transaction.
         Validation errors reference items by index, e.g. `items[3].recipient`.
-        Idempotency is per item via `idempotency_key`; if any key already exists the batch is
-        rejected with `409`.
+        Idempotency works at two levels:
+        - **Batch:** with an `Idempotency-Key` header, repeating the request returns the
+          original batch (same `batch_id` and `notification_ids`, in request order) with
+          `200 OK`. Reusing the key with different items is rejected with `422`.
+        - **Item:** `idempotency_key` on an item; if any item key already exists the whole
+          batch is rejected with `409`.
       parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/CorrelationID'
       requestBody:
         required: true
@@ -150,10 +156,21 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/BatchCreated' }
+        '200':
+          description: Idempotent replay; the batch created by the first request.
+          headers:
+            Idempotent-Replayed:
+              schema: { type: string, enum: ['true'] }
+            Location:
+              schema: { type: string }
+              description: URL of the batch summary.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BatchCreated' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
         '413': { $ref: '#/components/responses/PayloadTooLarge' }
-        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '422': { $ref: '#/components/responses/ValidationFailedOrKeyReused' }
 
   /v1/notifications/{id}:
     parameters:
@@ -364,7 +381,9 @@ components:
       name: Idempotency-Key
       in: header
       required: false
-      description: Client-chosen key (≤255 bytes) that makes the create request safe to retry.
+      description: |
+        Client-chosen key (≤255 bytes) that makes the create request safe to retry. The key is
+        bound to a fingerprint of the request body; reusing it with a different body is a `422`.
       schema: { type: string, maxLength: 255 }
     CorrelationID:
       name: X-Correlation-ID
@@ -390,6 +409,14 @@ components:
           schema: { $ref: '#/components/schemas/Problem' }
     Conflict:
       description: The resource is not in a state that allows this operation, or a uniqueness constraint was violated.
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+    ValidationFailedOrKeyReused:
+      description: |
+        Semantically invalid input (`errors` lists every invalid field), or the
+        `Idempotency-Key` was already used with a different request body
+        (title "Idempotency key reused").
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

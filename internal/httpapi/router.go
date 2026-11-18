@@ -16,7 +16,7 @@ import (
 // NotificationStore is the persistence the API needs; implemented by store/postgres.
 type NotificationStore interface {
 	CreateNotification(ctx context.Context, n domain.Notification) (domain.Notification, bool, error)
-	CreateBatch(ctx context.Context, ns []domain.Notification) error
+	CreateBatch(ctx context.Context, b domain.Batch) (domain.Batch, bool, error)
 	GetNotification(ctx context.Context, id uuid.UUID) (domain.Notification, error)
 	ListAttempts(ctx context.Context, id uuid.UUID) ([]domain.DeliveryAttempt, error)
 	ListNotifications(ctx context.Context, f domain.ListFilter) (domain.Page, error)

@@ -24,12 +24,13 @@ type fakeStore struct {
 	mu      sync.Mutex
 	byID    map[uuid.UUID]domain.Notification
 	byKey   map[string]uuid.UUID
+	batches map[string]domain.Batch // by batch idempotency key
 	lastLF  domain.ListFilter
 	listErr error
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{byID: map[uuid.UUID]domain.Notification{}, byKey: map[string]uuid.UUID{}}
+	return &fakeStore{byID: map[uuid.UUID]domain.Notification{}, byKey: map[string]uuid.UUID{}, batches: map[string]domain.Batch{}}
 }
 
 func (s *fakeStore) CreateNotification(_ context.Context, n domain.Notification) (domain.Notification, bool, error) {
@@ -45,20 +46,31 @@ func (s *fakeStore) CreateNotification(_ context.Context, n domain.Notification)
 	return n, true, nil
 }
 
-func (s *fakeStore) CreateBatch(_ context.Context, ns []domain.Notification) error {
+func (s *fakeStore) CreateBatch(_ context.Context, b domain.Batch) (domain.Batch, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, n := range ns {
+	if b.IdempotencyKey != nil {
+		if existing, ok := s.batches[*b.IdempotencyKey]; ok {
+			return existing, false, nil
+		}
+	}
+	for _, n := range b.Notifications {
 		if n.IdempotencyKey != nil {
 			if _, ok := s.byKey[*n.IdempotencyKey]; ok {
-				return domain.Conflict("idempotency key already used")
+				return domain.Batch{}, false, domain.Conflict("idempotency key already used")
 			}
 		}
 	}
-	for _, n := range ns {
+	for _, n := range b.Notifications {
 		s.byID[n.ID] = n
+		if n.IdempotencyKey != nil {
+			s.byKey[*n.IdempotencyKey] = n.ID
+		}
 	}
-	return nil
+	if b.IdempotencyKey != nil {
+		s.batches[*b.IdempotencyKey] = b
+	}
+	return b, true, nil
 }
 
 func (s *fakeStore) GetNotification(_ context.Context, id uuid.UUID) (domain.Notification, error) {
@@ -220,6 +232,27 @@ func TestCreateNotification_IdempotentReplay(t *testing.T) {
 	}
 }
 
+func TestCreateNotification_IdempotencyKeyReusedWithDifferentBody(t *testing.T) {
+	h := newTestServer(t, newFakeStore(), nil)
+
+	first := do(t, h, http.MethodPost, "/v1/notifications", validBody, "Idempotency-Key", "order-2")
+	other := strings.Replace(validBody, `"priority":"high"`, `"priority":"low"`, 1)
+	if other == validBody {
+		t.Fatal("test body was not changed")
+	}
+	second := do(t, h, http.MethodPost, "/v1/notifications", other, "Idempotency-Key", "order-2")
+
+	if first.Code != http.StatusCreated || second.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("statuses = %d, %d; want 201, 422", first.Code, second.Code)
+	}
+	if p := decode[problem](t, second); p.Title != "Idempotency key reused" {
+		t.Errorf("problem = %+v", p)
+	}
+	if second.Header().Get("Idempotent-Replayed") != "" {
+		t.Error("a rejected reuse must not be marked as a replay")
+	}
+}
+
 func TestCorrelationID(t *testing.T) {
 	h := newTestServer(t, newFakeStore(), nil)
 
@@ -268,6 +301,32 @@ func TestCreateBatch(t *testing.T) {
 		}
 		if p := decode[problem](t, rec); len(p.Errors) != 1 || p.Errors[0].Field != "items[1].channel" {
 			t.Errorf("errors = %+v", p.Errors)
+		}
+	})
+	t.Run("batch idempotency key", func(t *testing.T) {
+		keyed := `{"items":[` + validBody + `,{"channel":"push","recipient":"tok","content":"hi"}]}`
+		first := do(t, h, http.MethodPost, "/v1/notifications/batch", keyed, "Idempotency-Key", "batch-1")
+		replay := do(t, h, http.MethodPost, "/v1/notifications/batch", keyed, "Idempotency-Key", "batch-1")
+		if first.Code != http.StatusCreated || replay.Code != http.StatusOK {
+			t.Fatalf("statuses = %d, %d; want 201, 200", first.Code, replay.Code)
+		}
+		if replay.Header().Get("Idempotent-Replayed") != "true" {
+			t.Error("missing Idempotent-Replayed header")
+		}
+		a, b := decode[batchCreatedResponse](t, first), decode[batchCreatedResponse](t, replay)
+		if a.BatchID != b.BatchID || len(b.NotificationIDs) != 2 || a.NotificationIDs[1] != b.NotificationIDs[1] {
+			t.Errorf("replay returned a different batch: %+v vs %+v", a, b)
+		}
+
+		changed := `{"items":[` + validBody + `]}`
+		if rec := do(t, h, http.MethodPost, "/v1/notifications/batch", changed, "Idempotency-Key", "batch-1"); rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("reused key with different items: status = %d, want 422", rec.Code)
+		}
+	})
+	t.Run("existing item key rejects the batch", func(t *testing.T) {
+		dup := `{"items":[{"channel":"email","recipient":"b@example.com","content":"hi","idempotency_key":"k1"}]}`
+		if rec := do(t, h, http.MethodPost, "/v1/notifications/batch", dup); rec.Code != http.StatusConflict {
+			t.Errorf("status = %d, want 409", rec.Code)
 		}
 	})
 	t.Run("empty batch", func(t *testing.T) {

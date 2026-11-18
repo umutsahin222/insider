@@ -87,6 +87,9 @@ func TestCreateAndGet(t *testing.T) {
 		got.Channel != domain.ChannelSMS || got.CorrelationID != "corr" || got.MaxAttempts != 5 {
 		t.Errorf("round trip mismatch: %+v", got)
 	}
+	if got.RequestHash == "" || got.RequestHash != n.RequestHash {
+		t.Errorf("request_hash = %q, want %q", got.RequestHash, n.RequestHash)
+	}
 	if got.ScheduledAt == nil || !got.NextAttemptAt.After(time.Now()) {
 		t.Errorf("schedule not persisted: scheduled=%v next=%v", got.ScheduledAt, got.NextAttemptAt)
 	}
@@ -138,14 +141,15 @@ func TestCreateBatch(t *testing.T) {
 		items[i] = domain.CreateInput{Channel: "email", Recipient: fmt.Sprintf("u%d@example.com", i), Content: "hi",
 			IdempotencyKey: fmt.Sprintf("batch-%s-%d", t.Name(), i)}
 	}
-	batchID, ns, err := domain.NewBatch(items, domain.DefaultRules(), time.Now())
+	batch, err := domain.NewBatch(items, "batch-key-"+uuid.NewString(), domain.DefaultRules(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testStore.CreateBatch(ctx, ns); err != nil {
-		t.Fatal(err)
+	created, isNew, err := testStore.CreateBatch(ctx, batch)
+	if err != nil || !isNew || created.ID != batch.ID {
+		t.Fatalf("create: isNew=%v id=%v err=%v", isNew, created.ID, err)
 	}
-	sum, err := testStore.BatchSummary(ctx, batchID)
+	sum, err := testStore.BatchSummary(ctx, batch.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,22 +157,90 @@ func TestCreateBatch(t *testing.T) {
 		t.Errorf("summary = %+v", sum)
 	}
 
-	t.Run("reused idempotency key rejects the whole batch", func(t *testing.T) {
+	t.Run("replay returns the original batch in request order", func(t *testing.T) {
+		// A retried request is rebuilt from scratch: new notification IDs, new batch ID.
+		retry, err := domain.NewBatch(items, *batch.IdempotencyKey, domain.DefaultRules(), time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, isNew, err := testStore.CreateBatch(ctx, retry)
+		if err != nil || isNew {
+			t.Fatalf("replay: isNew=%v err=%v", isNew, err)
+		}
+		if got.ID != batch.ID || got.RequestHash != batch.RequestHash || len(got.Notifications) != len(batch.Notifications) {
+			t.Fatalf("replay = id %v hash %q n=%d", got.ID, got.RequestHash, len(got.Notifications))
+		}
+		for i := range got.Notifications {
+			if got.Notifications[i].ID != batch.Notifications[i].ID {
+				t.Fatalf("notification %d: %v, want %v (order not preserved)", i, got.Notifications[i].ID, batch.Notifications[i].ID)
+			}
+		}
+		if sum, _ := testStore.BatchSummary(ctx, batch.ID); sum.Total != 1000 {
+			t.Errorf("replay inserted rows: total = %d", sum.Total)
+		}
+	})
+
+	t.Run("reused item idempotency key rejects the whole batch", func(t *testing.T) {
 		again := []domain.CreateInput{
 			{Channel: "sms", Recipient: "+905551234567", Content: "new", IdempotencyKey: "fresh-" + uuid.NewString()},
 			{Channel: "sms", Recipient: "+905551234567", Content: "dup", IdempotencyKey: items[0].IdempotencyKey},
 		}
-		id2, ns2, err := domain.NewBatch(again, domain.DefaultRules(), time.Now())
+		b2, err := domain.NewBatch(again, "batch-key-"+uuid.NewString(), domain.DefaultRules(), time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := testStore.CreateBatch(ctx, ns2); !errors.Is(err, domain.ErrConflict) {
+		if _, _, err := testStore.CreateBatch(ctx, b2); !errors.Is(err, domain.ErrConflict) {
 			t.Fatalf("err = %v, want ErrConflict", err)
 		}
-		if _, err := testStore.BatchSummary(ctx, id2); !errors.Is(err, domain.ErrNotFound) {
+		if _, err := testStore.BatchSummary(ctx, b2.ID); !errors.Is(err, domain.ErrNotFound) {
 			t.Errorf("partial batch persisted: %v", err)
 		}
+		var batchRows int
+		if err := testStore.pool.QueryRow(ctx, `SELECT count(*) FROM batches WHERE id = $1`, b2.ID).Scan(&batchRows); err != nil || batchRows != 0 {
+			t.Errorf("batch row persisted after rollback: rows=%d err=%v", batchRows, err)
+		}
 	})
+}
+
+func TestCreateBatch_IdempotencyIsRaceFree(t *testing.T) {
+	ctx := context.Background()
+	key := "batch-race-" + uuid.NewString()
+	items := []domain.CreateInput{
+		{Channel: "sms", Recipient: "+905551234567", Content: "a"},
+		{Channel: "push", Recipient: "tok", Content: "b"},
+	}
+
+	const workers = 20
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		created int
+		ids     = map[uuid.UUID]bool{}
+	)
+	for range workers {
+		wg.Go(func() {
+			b, err := domain.NewBatch(items, key, domain.DefaultRules(), time.Now())
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			got, isNew, err := testStore.CreateBatch(ctx, b)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if isNew {
+				created++
+			}
+			ids[got.ID] = true
+		})
+	}
+	wg.Wait()
+	if created != 1 || len(ids) != 1 {
+		t.Errorf("created=%d distinct batch ids=%d, want exactly one batch", created, len(ids))
+	}
 }
 
 func TestCancel(t *testing.T) {
@@ -192,16 +264,17 @@ func TestCancel(t *testing.T) {
 
 func TestCancelBatch(t *testing.T) {
 	ctx := context.Background()
-	batchID, ns, err := domain.NewBatch([]domain.CreateInput{
+	batch, err := domain.NewBatch([]domain.CreateInput{
 		{Channel: "push", Recipient: "tok-1", Content: "a"},
 		{Channel: "push", Recipient: "tok-2", Content: "b"},
-	}, domain.DefaultRules(), time.Now())
+	}, "", domain.DefaultRules(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testStore.CreateBatch(ctx, ns); err != nil {
+	if _, _, err := testStore.CreateBatch(ctx, batch); err != nil {
 		t.Fatal(err)
 	}
+	batchID, ns := batch.ID, batch.Notifications
 	if _, err := testStore.CancelNotification(ctx, ns[0].ID); err != nil {
 		t.Fatal(err)
 	}
@@ -231,13 +304,14 @@ func TestListNotifications_KeysetPagination(t *testing.T) {
 			items[i].Recipient = "tok"
 		}
 	}
-	batchID, ns, err := domain.NewBatch(items, domain.DefaultRules(), time.Now())
+	batch, err := domain.NewBatch(items, "", domain.DefaultRules(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testStore.CreateBatch(ctx, ns); err != nil {
+	if _, _, err := testStore.CreateBatch(ctx, batch); err != nil {
 		t.Fatal(err)
 	}
+	batchID := batch.ID
 
 	// Page through the batch 3 at a time; every row must appear exactly once.
 	seen := map[uuid.UUID]bool{}

@@ -15,6 +15,8 @@ var (
 	// ErrLeaseLost means a worker tried to finish an attempt it no longer owns: its lease
 	// expired and the notification was reaped (and possibly re-claimed) in the meantime.
 	ErrLeaseLost = errors.New("lease lost")
+	// ErrIdempotencyMismatch means an idempotency key was reused with a different request body.
+	ErrIdempotencyMismatch = errors.New("idempotency key reused with a different request")
 )
 
 // Error is a sentinel-classified error whose message is safe to show to API clients.

@@ -49,6 +49,14 @@ type batchCreatedResponse struct {
 	NotificationIDs []uuid.UUID `json:"notification_ids"`
 }
 
+func toBatchCreatedResponse(b domain.Batch) batchCreatedResponse {
+	ids := make([]uuid.UUID, len(b.Notifications))
+	for i, n := range b.Notifications {
+		ids[i] = n.ID
+	}
+	return batchCreatedResponse{BatchID: b.ID, Count: len(ids), NotificationIDs: ids}
+}
+
 type notificationResponse struct {
 	ID                uuid.UUID  `json:"id"`
 	BatchID           *uuid.UUID `json:"batch_id"`

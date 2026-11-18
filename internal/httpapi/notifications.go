@@ -41,6 +41,11 @@ func (a *api) createNotification(w http.ResponseWriter, r *http.Request) {
 
 	ctx = observability.WithNotificationID(ctx, stored.ID.String())
 	if !created {
+		if err := domain.VerifyReplay(stored.RequestHash, n.RequestHash); err != nil {
+			a.log.WarnContext(ctx, "idempotency key reused with a different request", "idempotency_key", in.IdempotencyKey)
+			a.writeError(w, r, err)
+			return
+		}
 		a.log.InfoContext(ctx, "idempotent replay", "idempotency_key", in.IdempotencyKey)
 		w.Header().Set("Idempotent-Replayed", "true")
 		writeJSON(w, http.StatusOK, toNotificationResponse(stored))
@@ -63,23 +68,34 @@ func (a *api) createBatch(w http.ResponseWriter, r *http.Request) {
 		inputs[i] = item.input(item.IdempotencyKey, corrID)
 	}
 
-	batchID, ns, err := domain.NewBatch(inputs, a.rules, a.now())
+	key := r.Header.Get("Idempotency-Key")
+	batch, err := domain.NewBatch(inputs, key, a.rules, a.now())
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	if err := a.store.CreateBatch(r.Context(), ns); err != nil {
+	stored, created, err := a.store.CreateBatch(r.Context(), batch)
+	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
 
-	ids := make([]uuid.UUID, len(ns))
-	for i, n := range ns {
-		ids[i] = n.ID
+	resp := toBatchCreatedResponse(stored)
+	if !created {
+		if err := domain.VerifyReplay(stored.RequestHash, batch.RequestHash); err != nil {
+			a.log.WarnContext(r.Context(), "idempotency key reused with a different batch", "idempotency_key", key)
+			a.writeError(w, r, err)
+			return
+		}
+		a.log.InfoContext(r.Context(), "idempotent batch replay", "batch_id", stored.ID, "idempotency_key", key)
+		w.Header().Set("Idempotent-Replayed", "true")
+		w.Header().Set("Location", "/v1/batches/"+stored.ID.String())
+		writeJSON(w, http.StatusOK, resp)
+		return
 	}
-	a.log.InfoContext(r.Context(), "batch accepted", "batch_id", batchID, "count", len(ns))
-	w.Header().Set("Location", "/v1/batches/"+batchID.String())
-	writeJSON(w, http.StatusCreated, batchCreatedResponse{BatchID: batchID, Count: len(ns), NotificationIDs: ids})
+	a.log.InfoContext(r.Context(), "batch accepted", "batch_id", stored.ID, "count", resp.Count)
+	w.Header().Set("Location", "/v1/batches/"+stored.ID.String())
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (a *api) getNotification(w http.ResponseWriter, r *http.Request) {

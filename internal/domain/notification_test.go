@@ -154,9 +154,13 @@ func TestNewBatch(t *testing.T) {
 
 	t.Run("valid batch shares one batch id", func(t *testing.T) {
 		items := []CreateInput{validSMS(), validSMS()}
-		batchID, ns, err := NewBatch(items, rules, now)
+		b, err := NewBatch(items, "", rules, now)
 		if err != nil {
 			t.Fatal(err)
+		}
+		batchID, ns := b.ID, b.Notifications
+		if b.IdempotencyKey != nil || b.RequestHash == "" {
+			t.Errorf("key = %v, hash = %q", b.IdempotencyKey, b.RequestHash)
 		}
 		if len(ns) != 2 {
 			t.Fatalf("len = %d, want 2", len(ns))
@@ -174,13 +178,16 @@ func TestNewBatch(t *testing.T) {
 	tests := []struct {
 		name       string
 		items      []CreateInput
+		key        string
 		wantFields []string
 	}{
-		{"empty", nil, []string{"items"}},
-		{"too many", []CreateInput{validSMS(), validSMS(), validSMS(), validSMS()}, []string{"items"}},
+		{"empty", nil, "", []string{"items"}},
+		{"too many", []CreateInput{validSMS(), validSMS(), validSMS(), validSMS()}, "", []string{"items"}},
+		{"batch key too long", []CreateInput{validSMS()}, strings.Repeat("k", 256), []string{"idempotency_key"}},
 		{
 			"errors are indexed",
 			[]CreateInput{validSMS(), {Channel: "sms", Recipient: "bad", Content: "x"}, {Channel: "fax", Recipient: "x", Content: "x"}},
+			"",
 			[]string{"items[1].recipient", "items[2].channel"},
 		},
 		{
@@ -189,13 +196,14 @@ func TestNewBatch(t *testing.T) {
 				{Channel: "sms", Recipient: "+905551234567", Content: "a", IdempotencyKey: "k"},
 				{Channel: "sms", Recipient: "+905551234567", Content: "b", IdempotencyKey: "k"},
 			},
+			"",
 			[]string{"items[1].idempotency_key"},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, ns, err := NewBatch(tt.items, rules, now)
-			if ns != nil {
+			b, err := NewBatch(tt.items, tt.key, rules, now)
+			if b.Notifications != nil {
 				t.Error("an invalid batch must not return notifications")
 			}
 			got := fields(t, err)

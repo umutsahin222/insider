@@ -32,14 +32,14 @@ func insertSMS(t *testing.T, count int, mutate func(i int, in *domain.CreateInpu
 			mutate(i, &items[i])
 		}
 	}
-	_, ns, err := domain.NewBatch(items, domain.DefaultRules(), time.Now())
+	batch, err := domain.NewBatch(items, "", domain.DefaultRules(), time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := testStore.CreateBatch(context.Background(), ns); err != nil {
+	if _, _, err := testStore.CreateBatch(context.Background(), batch); err != nil {
 		t.Fatal(err)
 	}
-	return ns
+	return batch.Notifications
 }
 
 func claimOne(t *testing.T, lease time.Duration) domain.Notification {

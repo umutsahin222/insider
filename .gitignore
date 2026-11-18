@@ -1,0 +1,18 @@
+# binaries
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# env / local
+.env
+.claude/settings.local.json
+
+# assessment brief (not part of the solution)
+*.pdf
+
+# editors
+.idea/
+.vscode/
+.DS_Store

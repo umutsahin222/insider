@@ -83,6 +83,7 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
     get:
       tags: [notifications]
@@ -142,16 +143,16 @@ paths:
       responses:
         '201':
           description: Batch created and queued.
+          headers:
+            Location:
+              schema: { type: string }
+              description: URL of the batch summary.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/BatchCreated' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
-        '413':
-          description: Request body too large.
-          content:
-            application/problem+json:
-              schema: { $ref: '#/components/schemas/Problem' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
 
   /v1/notifications/{id}:
@@ -377,8 +378,13 @@ components:
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
+    PayloadTooLarge:
+      description: Request body exceeds the limit (1 MiB single, 16 MiB batch).
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
     NotFound:
-      description: Resource not found.
+      description: Resource not found (also returned for malformed IDs).
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }

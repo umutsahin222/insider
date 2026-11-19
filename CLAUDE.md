@@ -41,6 +41,8 @@ Redis is used for the distributed rate limiter and status-event pub/sub. See `do
 - Before committing: `make lint test-unit` must pass.
 
 ## Commands
-- `make run` – `docker compose up --build`
+- `make run` – `docker compose up --build` (foreground) · `make up` – background, waits until healthy · `make down`
+- `make smoke` – end-to-end checks against a running stack (`scripts/smoke.sh`)
 - `make test` / `make test-unit` / `make lint` / `make lint-api` (OpenAPI, via Docker)
-- `make migrate-up` / `make migrate-down`
+- `make migrate-up` / `make migrate-down` (via the compose `migrate` service)
+- CI: `.github/workflows/ci.yml` (lint, tests, compose e2e); check workflow edits with `actionlint`

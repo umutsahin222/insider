@@ -130,12 +130,17 @@ func (a *api) parseSubscription(r *http.Request) (func(domain.StatusEvent) bool,
 		if err != nil {
 			return nil, 0, nil, bad("must be a UUID")
 		}
-		n, err := a.store.GetNotification(r.Context(), id)
-		if err != nil {
+		if _, err := a.store.GetNotification(r.Context(), id); err != nil {
 			return nil, 0, nil, err
 		}
 		match := func(e domain.StatusEvent) bool { return e.NotificationID == id }
-		snapshot := func(context.Context) ([]domain.StatusEvent, error) {
+		// Read again for the snapshot: the existence check above ran before subscribing, and
+		// a transition published in between would otherwise be missing from both.
+		snapshot := func(ctx context.Context) ([]domain.StatusEvent, error) {
+			n, err := a.store.GetNotification(ctx, id)
+			if err != nil {
+				return nil, err
+			}
 			return []domain.StatusEvent{domain.EventOf(n, a.now())}, nil
 		}
 		return match, wsBufferNotification, snapshot, nil

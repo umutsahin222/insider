@@ -69,6 +69,40 @@ func waitSubscribed(t *testing.T, hub *events.Hub, n int) {
 	}
 }
 
+// racingStream changes the stored notification while the handler subscribes, standing in
+// for a worker transition whose event was published just before the subscription existed.
+type racingStream struct {
+	EventStream
+	onSubscribe func()
+}
+
+func (s racingStream) Subscribe(match func(domain.StatusEvent) bool, buffer int) *events.Subscription {
+	s.onSubscribe()
+	return s.EventStream.Subscribe(match, buffer)
+}
+
+func TestWS_SnapshotIsReadAfterSubscribing(t *testing.T) {
+	store := newFakeStore()
+	hub := events.NewHub(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	deps := testDeps(store, nil)
+	var id uuid.UUID
+	deps.Stream = racingStream{EventStream: hub, onSubscribe: func() {
+		store.mu.Lock()
+		n := store.byID[id]
+		n.Status = domain.StatusSent
+		store.byID[id] = n
+		store.mu.Unlock()
+	}}
+	srv := httptest.NewServer(NewRouter(deps))
+	t.Cleanup(srv.Close)
+
+	id = decode[notificationResponse](t, do(t, srv.Config.Handler, http.MethodPost, "/v1/notifications", validBody)).ID
+	conn := dial(t, srv, "notification_id="+id.String())
+	if snap := readEvent(t, conn); snap.Status != domain.StatusSent {
+		t.Fatalf("snapshot status = %s, want sent (state after subscribing)", snap.Status)
+	}
+}
+
 func TestWS_NotificationSnapshotThenLiveEvents(t *testing.T) {
 	srv, store, hub := wsServer(t)
 	h := srv.Config.Handler

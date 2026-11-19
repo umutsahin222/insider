@@ -26,7 +26,22 @@ failure modes remained:
 - **Release does not consume an attempt.** Work handed back because the circuit breaker is open,
   the rate limiter is unreachable, or the worker is shutting down decrements `attempts` again.
 - **Lease sizing is validated at startup:** `LEASE_DURATION > PROVIDER_TIMEOUT × CLAIM_BATCH_SIZE`,
-  so a healthy worker can never lose a lease while working through its batch.
+  and `> PROVIDER_TIMEOUT + 10 s` (the store-write timeout), as a sizing hint.
+- **A worker never starts a send its lease might not cover.** Sizing alone is not enough: the
+  rows of a claimed batch wait for rate-limit tokens one after another, and with many replicas
+  sharing a 100/s bucket (or a low `RATE_LIMIT_PER_SECOND`) a late row can wait past its lease,
+  be reaped and claimed elsewhere, and then be sent by both workers. Found by the phase 7 code
+  review. Each row therefore has a send deadline, `claim time + lease − send timeout − store
+  timeout`, measured on the worker's monotonic clock from just *before* the claim (so it is never
+  later than the lease start on the database). The rate-limit wait is bounded by it; a row that
+  reaches it is released (`lease_expiring`, attempt handed back, due at once) instead of sent.
+  Outcome writes run detached from shutdown but with their own 10 s timeout, so a stalled
+  database cannot hold the process open either.
+- **The reaper's give-up rule is the one piece of retry policy in SQL**
+  (`CASE WHEN attempts >= max_attempts THEN 'failed' ELSE 'pending'`). It is a deliberate
+  exception to "no business rules in SQL": reaping must be one set-based conditional UPDATE, and
+  moving the decision to Go would mean reading rows and writing them back. The rule mirrors the
+  worker's (`attempts < max_attempts` retries) and is covered by the reaper integration tests.
 
 ## Consequences
 - + Duplicate *state changes* are impossible; duplicate *sends* remain possible only after a real

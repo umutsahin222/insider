@@ -3,9 +3,11 @@ package delivery
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sony/gobreaker/v2"
@@ -50,6 +52,27 @@ type Config struct {
 	Breaker      BreakerPolicy
 }
 
+// StoreTimeout bounds each queue write after a send (MarkSent, ScheduleRetry, MarkFailed,
+// Release). Those run detached from shutdown so an attempt is never cut in half, so they need
+// their own deadline: a stalled database must not keep the process from exiting.
+const StoreTimeout = 10 * time.Second
+
+// Validate checks the invariants the worker relies on.
+func (c Config) Validate() error {
+	var errs []error
+	if c.Concurrency < 1 || c.BatchSize < 1 {
+		errs = append(errs, errors.New("concurrency and batch size must be positive"))
+	}
+	if c.PollInterval <= 0 || c.SendTimeout <= 0 || c.Retry.Base <= 0 || c.Retry.Max < c.Retry.Base {
+		errs = append(errs, errors.New("poll interval, send timeout and retry base must be positive, and retry max >= retry base"))
+	}
+	// Each send must be able to start, finish and be recorded within the claim's lease.
+	if c.Lease <= c.SendTimeout+StoreTimeout {
+		errs = append(errs, fmt.Errorf("lease (%s) must exceed send timeout + %s", c.Lease, StoreTimeout))
+	}
+	return errors.Join(errs...)
+}
+
 // Worker delivers the notifications of a single channel. Each channel has its own worker,
 // limiter bucket and circuit breaker, so a slow or failing channel never blocks the others.
 type Worker struct {
@@ -64,6 +87,9 @@ type Worker struct {
 	log        *slog.Logger
 	breaker    *gobreaker.CircuitBreaker[domain.ProviderReply]
 	randN      func(int64) int64
+	// probing is set while this process's single half-open probe is between taking a
+	// rate-limit token and finishing its send; other loops release instead of taking tokens.
+	probing atomic.Bool
 }
 
 // Deps are a worker's collaborators. Metrics and Tracing are optional.
@@ -146,6 +172,8 @@ func (w *Worker) loop(ctx context.Context) {
 			w.sleep(ctx, w.cfg.PollInterval)
 			continue
 		}
+		// Taken before the claim, so it is never later than the lease's start on the database.
+		claimedAt := time.Now()
 		batch, err := w.queue.Claim(ctx, w.cfg.Channel, w.cfg.BatchSize, w.cfg.Lease)
 		if err != nil {
 			if ctx.Err() == nil {
@@ -158,19 +186,38 @@ func (w *Worker) loop(ctx context.Context) {
 			w.sleep(ctx, w.cfg.PollInterval)
 			continue
 		}
+		sendBy := w.sendDeadline(claimedAt)
 		for i, n := range batch {
 			if ctx.Err() != nil {
 				w.releaseAll(batch[i:], 0, ReleaseShuttingDown)
 				return
 			}
-			w.process(ctx, n)
+			w.deliver(ctx, n, sendBy)
 		}
 	}
 }
 
-// process delivers one claimed notification and records the outcome.
+// sendDeadline is the latest moment a row claimed at claimedAt may start its provider call:
+// the send and the write that records it must both finish before the lease expires, or the
+// reaper may already have handed the row to another worker (a duplicate send). Rows of a
+// batch wait for rate-limit tokens one after another, so late rows can reach it.
+func (w *Worker) sendDeadline(claimedAt time.Time) time.Time {
+	return claimedAt.Add(w.cfg.Lease - w.cfg.SendTimeout - StoreTimeout)
+}
+
+// process delivers one notification claimed just now.
 func (w *Worker) process(ctx context.Context, n domain.Notification) {
-	ctx = observability.WithNotificationID(observability.WithCorrelationID(ctx, n.CorrelationID), n.ID.String())
+	w.deliver(ctx, n, w.sendDeadline(time.Now()))
+}
+
+func notificationContext(ctx context.Context, n domain.Notification) context.Context {
+	return observability.WithNotificationID(observability.WithCorrelationID(ctx, n.CorrelationID), n.ID.String())
+}
+
+// deliver sends one claimed notification, unless its lease could expire first (sendBy),
+// and records the outcome.
+func (w *Worker) deliver(ctx context.Context, n domain.Notification, sendBy time.Time) {
+	ctx = notificationContext(ctx, n)
 
 	// Continue the trace of the request that created the notification: every attempt is a
 	// consumer span under it, so retries line up in one trace.
@@ -190,24 +237,41 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 
 	// The breaker may have opened while this claimed batch was being worked through: hand the
 	// rest back before taking a rate-limit token that another replica could have used.
-	if w.breaker.State() == gobreaker.StateOpen {
+	switch w.breaker.State() {
+	case gobreaker.StateOpen:
 		w.release(ctx, n, w.cfg.Breaker.OpenTimeout, ReleaseBreakerOpen)
 		return
+	case gobreaker.StateHalfOpen:
+		// The breaker admits one probe; only the loop that will make it takes a token.
+		if !w.probing.CompareAndSwap(false, true) {
+			w.release(ctx, n, w.cfg.PollInterval, ReleaseBreakerHalfOpen)
+			return
+		}
+		defer w.probing.Store(false)
 	}
 
+	if !time.Now().Before(sendBy) {
+		w.release(ctx, n, 0, ReleaseLeaseExpiring)
+		return
+	}
 	waitStart := time.Now()
-	_, waitSpan := w.tracer.Start(ctx, "ratelimit.wait")
-	err := w.limiter.Wait(ctx, string(w.cfg.Channel))
+	waitCtx, cancelWait := context.WithDeadline(ctx, sendBy)
+	_, waitSpan := w.tracer.Start(waitCtx, "ratelimit.wait")
+	err := w.limiter.Wait(waitCtx, string(w.cfg.Channel))
 	waitSpan.End()
+	cancelWait()
 	if err != nil {
-		// Fail closed: without the shared limiter we cannot prove we're under the provider limit.
-		delay := time.Second
-		if ctx.Err() != nil {
-			delay = 0
-		} else {
+		switch {
+		case ctx.Err() != nil:
+			w.release(ctx, n, 0, ReleaseShuttingDown)
+		case waitCtx.Err() != nil:
+			// Waited so long for a token that the lease could expire mid-send: hand it back.
+			w.release(ctx, n, 0, ReleaseLeaseExpiring)
+		default:
+			// Fail closed: without the shared limiter we cannot prove we're under the provider limit.
 			w.log.ErrorContext(ctx, "rate limiter unavailable", "error", err)
+			w.release(ctx, n, time.Second, ReleaseLimiterDown)
 		}
-		w.release(ctx, n, delay, ReleaseLimiterDown)
 		return
 	}
 	w.metrics.RateLimitWaited(w.cfg.Channel, time.Since(waitStart))
@@ -253,6 +317,8 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 		storeErr error
 		result   Result
 	)
+	storeCtx, cancelStore := context.WithTimeout(workCtx, StoreTimeout)
+	defer cancelStore()
 	switch {
 	case outcome == domain.OutcomeSuccess:
 		result = ResultSent
@@ -260,19 +326,19 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 		if reply.MessageID != "" {
 			msgID = &reply.MessageID
 		}
-		storeErr = w.queue.MarkSent(workCtx, n, msgID, attempt)
+		storeErr = w.queue.MarkSent(storeCtx, n, msgID, attempt)
 		w.log.InfoContext(ctx, "notification sent", "attempt", n.Attempts, "duration_ms", duration.Milliseconds())
 
 	case outcome == domain.OutcomeRetryableError && n.Attempts < n.MaxAttempts:
 		result = ResultRetry
 		delay := w.cfg.Retry.Delay(n.Attempts, reply.RetryAfter, w.randN)
-		storeErr = w.queue.ScheduleRetry(workCtx, n, delay, attempt)
+		storeErr = w.queue.ScheduleRetry(storeCtx, n, delay, attempt)
 		w.log.WarnContext(ctx, "delivery failed, retry scheduled",
 			"attempt", n.Attempts, "max_attempts", n.MaxAttempts, "retry_in", delay.String(), "reason", *attempt.Error)
 
 	default: // permanent error, or retryable with no attempts left
 		result = ResultFailed
-		storeErr = w.queue.MarkFailed(workCtx, n, attempt)
+		storeErr = w.queue.MarkFailed(storeCtx, n, attempt)
 		w.log.ErrorContext(ctx, "delivery failed permanently",
 			"attempt", n.Attempts, "max_attempts", n.MaxAttempts, "outcome", string(outcome), "reason", *attempt.Error)
 	}
@@ -314,11 +380,11 @@ func (w *Worker) release(ctx context.Context, n domain.Notification, delay time.
 	w.metrics.Released(w.cfg.Channel, reason)
 	trace.SpanFromContext(ctx).SetAttributes(
 		attribute.String("delivery.result", "released"), attribute.String("delivery.release_reason", string(reason)))
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), StoreTimeout)
 	defer cancel()
 	if err := w.queue.Release(ctx, n, delay); err != nil {
 		if !errors.Is(err, domain.ErrLeaseLost) {
-			w.log.ErrorContext(ctx, "release failed", "error", err, "notification_id", n.ID.String(), "reason", string(reason))
+			w.log.ErrorContext(ctx, "release failed", "error", err, "reason", string(reason))
 		}
 		return
 	}
@@ -329,7 +395,7 @@ func (w *Worker) release(ctx context.Context, n domain.Notification, delay time.
 
 func (w *Worker) releaseAll(ns []domain.Notification, delay time.Duration, reason ReleaseReason) {
 	for _, n := range ns {
-		w.release(context.Background(), n, delay, reason)
+		w.release(notificationContext(context.Background(), n), n, delay, reason)
 	}
 }
 

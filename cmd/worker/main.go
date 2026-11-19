@@ -92,7 +92,7 @@ func run() error {
 
 	var wg sync.WaitGroup
 	for _, ch := range cfg.Channels {
-		w := delivery.NewWorker(delivery.Config{
+		wcfg := delivery.Config{
 			Channel:      ch,
 			Concurrency:  cfg.Concurrency,
 			BatchSize:    cfg.ClaimBatchSize,
@@ -107,7 +107,13 @@ func run() error {
 				Window:              cfg.BreakerWindow,
 				OpenTimeout:         cfg.BreakerOpenTimeout,
 			},
-		}, delivery.Deps{
+		}
+		if err := wcfg.Validate(); err != nil {
+			stop()
+			wg.Wait()
+			return fmt.Errorf("worker config: %w", err)
+		}
+		w := delivery.NewWorker(wcfg, delivery.Deps{
 			Queue: store, Sender: sender, Limiter: limiter,
 			Metrics: deliveryMetrics, Events: publisher, Tracing: tracing, Logger: log,
 		})

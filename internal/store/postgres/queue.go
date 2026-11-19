@@ -118,6 +118,9 @@ func (s *Store) Release(ctx context.Context, n domain.Notification, delay time.D
 
 // ReapExpired returns notifications whose lease expired (crashed or stuck worker) to the
 // queue, or fails them if that was their last attempt. It returns the rows it changed.
+//
+// The give-up rule (attempts >= max_attempts) mirrors delivery's retry decision; it lives in
+// SQL so reaping stays one set-based conditional UPDATE (see ADR-005).
 func (s *Store) ReapExpired(ctx context.Context) ([]domain.Notification, error) {
 	rows, err := s.pool.Query(ctx, `
 		UPDATE notifications SET

@@ -28,6 +28,9 @@ const (
 	ReleaseLimiterDown     ReleaseReason = "rate_limiter_unavailable"
 	ReleaseShuttingDown    ReleaseReason = "shutdown"
 	ReleaseBreakerHalfOpen ReleaseReason = "circuit_half_open"
+	// ReleaseLeaseExpiring: the rate-limit wait ran so long that the lease could expire
+	// before the send was recorded; the row goes back rather than risk a duplicate send.
+	ReleaseLeaseExpiring ReleaseReason = "lease_expiring"
 )
 
 // BreakerState is the circuit breaker state, reported as a number so it can be graphed.

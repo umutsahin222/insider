@@ -16,8 +16,14 @@ import (
 
 	"github.com/umutsahin222/insider/internal/config"
 	"github.com/umutsahin222/insider/internal/httpapi"
+	"github.com/umutsahin222/insider/internal/metrics"
 	"github.com/umutsahin222/insider/internal/observability"
 	"github.com/umutsahin222/insider/internal/store/postgres"
+)
+
+const (
+	queueStatsTimeout = 2 * time.Second
+	queueStatsCache   = time.Second
 )
 
 func main() {
@@ -52,6 +58,11 @@ func run() error {
 	rdb := redis.NewClient(redisOpts)
 	defer func() { _ = rdb.Close() }()
 
+	// Queue depth is exported by the API (not the workers), read from the database at scrape
+	// time with a short cache; see ADR-007.
+	reg := metrics.NewRegistry()
+	reg.MustRegister(metrics.NewQueueCollector(store, queueStatsTimeout, queueStatsCache, log.With("component", "queue_metrics")))
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Store:  store,
 		Rules:  cfg.Rules,
@@ -60,6 +71,8 @@ func run() error {
 			"postgres": store.Ping,
 			"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 		},
+		Metrics:        metrics.NewHTTPMetrics(reg),
+		MetricsHandler: metrics.MetricsHandler(reg),
 	})
 
 	srv := &http.Server{

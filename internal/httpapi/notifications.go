@@ -51,6 +51,7 @@ func (a *api) createNotification(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, toNotificationResponse(stored))
 		return
 	}
+	a.metrics.NotificationAccepted(stored.Channel, stored.Priority)
 	a.log.InfoContext(ctx, "notification accepted", "channel", stored.Channel, "priority", stored.Priority.String())
 	w.Header().Set("Location", "/v1/notifications/"+stored.ID.String())
 	writeJSON(w, http.StatusCreated, toNotificationResponse(stored))
@@ -92,6 +93,9 @@ func (a *api) createBatch(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Location", "/v1/batches/"+stored.ID.String())
 		writeJSON(w, http.StatusOK, resp)
 		return
+	}
+	for _, n := range stored.Notifications {
+		a.metrics.NotificationAccepted(n.Channel, n.Priority)
 	}
 	a.log.InfoContext(r.Context(), "batch accepted", "batch_id", stored.ID, "count", resp.Count)
 	w.Header().Set("Location", "/v1/batches/"+stored.ID.String())

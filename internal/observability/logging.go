@@ -1,4 +1,4 @@
-// Package observability provides logging, correlation and (later) metrics/tracing helpers.
+// Package observability provides structured logging and request correlation helpers.
 package observability
 
 import (

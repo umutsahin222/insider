@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -99,8 +100,59 @@ func testConfig() Config {
 	}
 }
 
+// recordingMetrics captures what the worker reports.
+type recordingMetrics struct {
+	mu        sync.Mutex
+	attempts  []string // "<outcome>/<result>"
+	delivered []time.Duration
+	released  []ReleaseReason
+	breaker   []BreakerState
+	waits     int
+	reclaimed int
+}
+
+func (m *recordingMetrics) AttemptFinished(_ domain.Channel, o domain.AttemptOutcome, r Result, _ time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.attempts = append(m.attempts, string(o)+"/"+string(r))
+}
+
+func (m *recordingMetrics) Delivered(_ domain.Channel, d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.delivered = append(m.delivered, d)
+}
+
+func (m *recordingMetrics) RateLimitWaited(domain.Channel, time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.waits++
+}
+
+func (m *recordingMetrics) Released(_ domain.Channel, r ReleaseReason) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.released = append(m.released, r)
+}
+
+func (m *recordingMetrics) BreakerStateChanged(_ domain.Channel, s BreakerState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.breaker = append(m.breaker, s)
+}
+
+func (m *recordingMetrics) Reclaimed(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reclaimed += n
+}
+
 func newTestWorker(q Queue, s Sender, l Limiter) *Worker {
-	w := NewWorker(testConfig(), q, s, l, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return newMeteredTestWorker(q, s, l, nil)
+}
+
+func newMeteredTestWorker(q Queue, s Sender, l Limiter, m Metrics) *Worker {
+	w := NewWorker(testConfig(), q, s, l, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	w.randN = func(n int64) int64 { return n - 1 } // deterministic: top of the jitter range
 	return w
 }
@@ -274,6 +326,93 @@ func TestLoop_ReleasesUnprocessedClaimsOnShutdown(t *testing.T) {
 		}
 	}
 }
+
+func TestMetrics_ReportOutcomesReleasesAndBreaker(t *testing.T) {
+	m := &recordingMetrics{}
+	s := &scriptedSender{reply: domain.ProviderReply{StatusCode: 202}}
+	w := newMeteredTestWorker(&fakeQueue{}, s, allow, m)
+
+	due := claimed(1, 5)
+	due.CreatedAt = time.Now().Add(-3 * time.Second)
+	w.process(context.Background(), due)
+
+	s.reply = domain.ProviderReply{StatusCode: 400}
+	w.process(context.Background(), claimed(1, 5))
+
+	s.reply = domain.ProviderReply{StatusCode: 503} // trips the breaker after 3 failures
+	for range 4 {
+		w.process(context.Background(), claimed(1, 5))
+	}
+
+	want := []string{
+		"success/sent", "permanent_error/failed",
+		"retryable_error/retry_scheduled", "retryable_error/retry_scheduled", "retryable_error/retry_scheduled",
+	}
+	if strings.Join(m.attempts, ",") != strings.Join(want, ",") {
+		t.Errorf("attempts = %v, want %v", m.attempts, want)
+	}
+	if len(m.delivered) != 1 || m.delivered[0] < 3*time.Second || m.delivered[0] > 10*time.Second {
+		t.Errorf("delivered = %v, want one ≈3s end-to-end latency", m.delivered)
+	}
+	if len(m.released) != 1 || m.released[0] != ReleaseBreakerOpen {
+		t.Errorf("released = %v, want one circuit_open", m.released)
+	}
+	if len(m.breaker) != 2 || m.breaker[0] != BreakerClosed || m.breaker[1] != BreakerOpen {
+		t.Errorf("breaker states = %v, want [closed open]", m.breaker)
+	}
+	if m.waits != 5 {
+		t.Errorf("rate-limit waits = %d, want 5 (one per send that got a token)", m.waits)
+	}
+}
+
+func TestMetrics_ScheduledNotificationLatencyStartsWhenDue(t *testing.T) {
+	m := &recordingMetrics{}
+	w := newMeteredTestWorker(&fakeQueue{}, &scriptedSender{reply: domain.ProviderReply{StatusCode: 202}}, allow, m)
+
+	n := claimed(1, 5)
+	n.CreatedAt = time.Now().Add(-time.Hour)
+	at := time.Now().Add(-2 * time.Second)
+	n.ScheduledAt = &at
+	w.process(context.Background(), n)
+
+	if len(m.delivered) != 1 || m.delivered[0] > 10*time.Second {
+		t.Errorf("delivered = %v, want ≈2s (since scheduled time, not creation)", m.delivered)
+	}
+}
+
+func TestMetrics_LeaseLostIsReported(t *testing.T) {
+	m := &recordingMetrics{}
+	q := &leaseLosingQueue{}
+	w := newMeteredTestWorker(q, &scriptedSender{reply: domain.ProviderReply{StatusCode: 202}}, allow, m)
+
+	w.process(context.Background(), claimed(1, 5))
+
+	if len(m.attempts) != 1 || m.attempts[0] != "success/lease_lost" || len(m.delivered) != 0 {
+		t.Errorf("attempts = %v delivered = %v; want success/lease_lost and no delivery", m.attempts, m.delivered)
+	}
+}
+
+type leaseLosingQueue struct{ fakeQueue }
+
+func (q *leaseLosingQueue) MarkSent(context.Context, domain.Notification, *string, domain.DeliveryAttempt) error {
+	return domain.ErrLeaseLost
+}
+
+func TestReaper_ReportsReclaimed(t *testing.T) {
+	m := &recordingMetrics{}
+	ctx, cancel := context.WithCancel(context.Background())
+	r := reaperFunc(func(context.Context) (int, error) { cancel(); return 7, nil })
+
+	RunReaper(ctx, r, time.Millisecond, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if m.reclaimed != 7 {
+		t.Errorf("reclaimed = %d, want 7", m.reclaimed)
+	}
+}
+
+type reaperFunc func(context.Context) (int, error)
+
+func (f reaperFunc) ReapExpired(ctx context.Context) (int, error) { return f(ctx) }
 
 type cancelingSender struct{ cancel context.CancelFunc }
 

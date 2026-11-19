@@ -28,6 +28,19 @@ type NotificationStore interface {
 // Check reports whether a dependency is healthy; used by /readyz.
 type Check func(ctx context.Context) error
 
+// Metrics receives API measurements; implemented by metrics.HTTPMetrics.
+type Metrics interface {
+	// ObserveRequest records one request; route is the matched pattern, not the raw path.
+	ObserveRequest(method, route string, status int, d time.Duration)
+	// NotificationAccepted counts one newly queued notification (not idempotent replays).
+	NotificationAccepted(ch domain.Channel, p domain.Priority)
+}
+
+type nopMetrics struct{}
+
+func (nopMetrics) ObserveRequest(string, string, int, time.Duration)    {}
+func (nopMetrics) NotificationAccepted(domain.Channel, domain.Priority) {}
+
 // Deps are the explicit dependencies of the HTTP API.
 type Deps struct {
 	Store  NotificationStore
@@ -37,6 +50,10 @@ type Deps struct {
 	Checks map[string]Check
 	// Now is the clock; defaults to time.Now.
 	Now func() time.Time
+	// Metrics records request and intake metrics; nil disables them.
+	Metrics Metrics
+	// MetricsHandler, if set, is served at GET /metrics.
+	MetricsHandler http.Handler
 }
 
 const (
@@ -45,25 +62,32 @@ const (
 )
 
 type api struct {
-	store  NotificationStore
-	rules  domain.Rules
-	log    *slog.Logger
-	checks map[string]Check
-	now    func() time.Time
+	store   NotificationStore
+	rules   domain.Rules
+	log     *slog.Logger
+	checks  map[string]Check
+	now     func() time.Time
+	metrics Metrics
 }
 
 // NewRouter builds the HTTP handler with all routes and middleware.
 func NewRouter(d Deps) http.Handler {
-	a := &api{store: d.Store, rules: d.Rules, log: d.Logger, checks: d.Checks, now: d.Now}
+	a := &api{store: d.Store, rules: d.Rules, log: d.Logger, checks: d.Checks, now: d.Now, metrics: d.Metrics}
 	if a.now == nil {
 		a.now = time.Now
 	}
+	if a.metrics == nil {
+		a.metrics = nopMetrics{}
+	}
 
 	r := chi.NewRouter()
-	r.Use(correlation, a.requestLog, a.recoverer)
+	r.Use(correlation, a.observe, a.recoverer)
 
 	r.Get("/healthz", a.liveness)
 	r.Get("/readyz", a.readiness)
+	if d.MetricsHandler != nil {
+		r.Method(http.MethodGet, "/metrics", d.MetricsHandler)
+	}
 
 	r.Route("/v1", func(r chi.Router) {
 		r.With(maxBody(maxSingleBody)).Post("/notifications", a.createNotification)

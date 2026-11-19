@@ -61,6 +61,8 @@ func loadAPI(lookup func(string) (string, bool)) (API, error) {
 
 // Worker is the configuration of cmd/worker.
 type Worker struct {
+	// HTTPAddr serves the worker's operational endpoints: /metrics, /healthz, /readyz.
+	HTTPAddr        string
 	DatabaseURL     string
 	RedisURL        string
 	LogLevel        slog.Level
@@ -94,6 +96,7 @@ func LoadWorker() (Worker, error) {
 func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 	e := env{lookup: lookup}
 	cfg := Worker{
+		HTTPAddr:        e.str("HTTP_ADDR", ":9091"),
 		DatabaseURL:     e.str("DATABASE_URL", "postgres://notify:notify@localhost:5432/notify?sslmode=disable"),
 		RedisURL:        e.str("REDIS_URL", "redis://localhost:6379/0"),
 		LogLevel:        e.level("LOG_LEVEL", slog.LevelInfo),

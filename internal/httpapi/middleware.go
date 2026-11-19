@@ -32,25 +32,34 @@ func correlation(next http.Handler) http.Handler {
 	})
 }
 
-// requestLog writes one structured access-log line per request.
-func (a *api) requestLog(next http.Handler) http.Handler {
+// observe writes one structured access-log line per request and records request metrics.
+// Both use the matched route pattern, which keeps metric cardinality bounded.
+func (a *api) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
+		elapsed := time.Since(start)
 
 		route := chi.RouteContext(r.Context()).RoutePattern()
 		if route == "" {
 			route = "unmatched"
 		}
+		status := ww.Status()
+		if status == 0 { // handler wrote nothing: net/http sends 200
+			status = http.StatusOK
+		}
+		a.metrics.ObserveRequest(r.Method, route, status, elapsed)
+
 		level := a.log.InfoContext
-		if route == "/healthz" || route == "/readyz" {
+		switch route {
+		case "/healthz", "/readyz", "/metrics":
 			level = a.log.DebugContext
 		}
 		level(r.Context(), "http request",
 			"method", r.Method, "route", route, "path", r.URL.Path,
-			"status", ww.Status(), "bytes", ww.BytesWritten(),
-			"duration_ms", time.Since(start).Milliseconds())
+			"status", status, "bytes", ww.BytesWritten(),
+			"duration_ms", elapsed.Milliseconds())
 	})
 }
 

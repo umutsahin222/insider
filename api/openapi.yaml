@@ -356,8 +356,20 @@ paths:
       operationId: metrics
       summary: Prometheus metrics
       description: |
-        Includes `notifications_queue_depth{channel,priority}`, `notifications_delivered_total{channel,outcome}`,
-        `notification_delivery_duration_seconds`, `notification_end_to_end_seconds` and HTTP metrics.
+        Prometheus exposition of the API process. Queue metrics are read from the database at
+        scrape time (cached for 1 s):
+        - `notification_queue_depth{channel,priority,state}` – state is `ready`, `delayed` or `processing`
+        - `notification_queue_oldest_ready_age_seconds{channel}` – queue lag
+        - `notification_queue_stats_up`
+        - `notifications_accepted_total{channel,priority}`
+        - `http_requests_total{method,route,status}`, `http_request_duration_seconds{method,route}`
+
+        Delivery metrics are exposed by each worker on its own `HTTP_ADDR` (default `:9091`):
+        `notification_deliveries_total{channel,outcome,result}`,
+        `notification_provider_request_duration_seconds{channel,outcome}`,
+        `notification_end_to_end_latency_seconds{channel}`, `notification_rate_limit_wait_seconds{channel}`,
+        `notification_releases_total{channel,reason}`, `notification_circuit_breaker_state{channel}`,
+        `notification_reaper_reclaimed_total`. See ADR-007.
       responses:
         '200':
           description: Prometheus text exposition format.

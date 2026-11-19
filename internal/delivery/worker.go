@@ -55,6 +55,7 @@ type Worker struct {
 	queue   Queue
 	sender  Sender
 	limiter Limiter
+	metrics Metrics
 	log     *slog.Logger
 	breaker *gobreaker.CircuitBreaker[domain.ProviderReply]
 	randN   func(int64) int64
@@ -63,10 +64,13 @@ type Worker struct {
 // errRetryable marks a send the breaker should count as a failure.
 var errRetryable = errors.New("retryable provider failure")
 
-// NewWorker wires a channel worker.
-func NewWorker(cfg Config, q Queue, s Sender, l Limiter, log *slog.Logger) *Worker {
+// NewWorker wires a channel worker. A nil m disables metrics.
+func NewWorker(cfg Config, q Queue, s Sender, l Limiter, m Metrics, log *slog.Logger) *Worker {
+	if m == nil {
+		m = NopMetrics{}
+	}
 	log = log.With("channel", string(cfg.Channel))
-	w := &Worker{cfg: cfg, queue: q, sender: s, limiter: l, log: log, randN: rand.Int64N}
+	w := &Worker{cfg: cfg, queue: q, sender: s, limiter: l, metrics: m, log: log, randN: rand.Int64N}
 	w.breaker = gobreaker.NewCircuitBreaker[domain.ProviderReply](gobreaker.Settings{
 		Name:        string(cfg.Channel),
 		MaxRequests: 1, // a single probe in half-open state
@@ -74,9 +78,22 @@ func NewWorker(cfg Config, q Queue, s Sender, l Limiter, log *slog.Logger) *Work
 		ReadyToTrip: func(c gobreaker.Counts) bool { return c.ConsecutiveFailures >= cfg.BreakerFailures },
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			log.Warn("circuit breaker state changed", "from", from.String(), "to", to.String())
+			m.BreakerStateChanged(cfg.Channel, breakerState(to))
 		},
 	})
+	m.BreakerStateChanged(cfg.Channel, BreakerClosed)
 	return w
+}
+
+func breakerState(s gobreaker.State) BreakerState {
+	switch s {
+	case gobreaker.StateOpen:
+		return BreakerOpen
+	case gobreaker.StateHalfOpen:
+		return BreakerHalfOpen
+	default:
+		return BreakerClosed
+	}
 }
 
 // Run processes the channel until ctx is cancelled, then waits for in-flight sends to finish.
@@ -111,7 +128,7 @@ func (w *Worker) loop(ctx context.Context) {
 		}
 		for i, n := range batch {
 			if ctx.Err() != nil {
-				w.releaseAll(batch[i:], 0, "shutting down")
+				w.releaseAll(batch[i:], 0, ReleaseShuttingDown)
 				return
 			}
 			w.process(ctx, n)
@@ -123,6 +140,14 @@ func (w *Worker) loop(ctx context.Context) {
 func (w *Worker) process(ctx context.Context, n domain.Notification) {
 	ctx = observability.WithNotificationID(observability.WithCorrelationID(ctx, n.CorrelationID), n.ID.String())
 
+	// The breaker may have opened while this claimed batch was being worked through: hand the
+	// rest back before taking a rate-limit token that another replica could have used.
+	if w.breaker.State() == gobreaker.StateOpen {
+		w.release(ctx, n, w.cfg.BreakerOpenTimeout, ReleaseBreakerOpen)
+		return
+	}
+
+	waitStart := time.Now()
 	if err := w.limiter.Wait(ctx, string(w.cfg.Channel)); err != nil {
 		// Fail closed: without the shared limiter we cannot prove we're under the provider limit.
 		delay := time.Second
@@ -131,9 +156,10 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 		} else {
 			w.log.ErrorContext(ctx, "rate limiter unavailable", "error", err)
 		}
-		w.release(ctx, n, delay, "rate limiter unavailable")
+		w.release(ctx, n, delay, ReleaseLimiterDown)
 		return
 	}
+	w.metrics.RateLimitWaited(w.cfg.Channel, time.Since(waitStart))
 
 	// From here on, finish the attempt even if shutdown starts: the provider call and the
 	// state change must not be cut in half.
@@ -152,8 +178,12 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 	duration := time.Since(start)
 	cancel()
 
-	if errors.Is(err, gobreaker.ErrOpenState) || errors.Is(err, gobreaker.ErrTooManyRequests) {
-		w.release(workCtx, n, w.cfg.BreakerOpenTimeout, "circuit breaker open")
+	switch {
+	case errors.Is(err, gobreaker.ErrOpenState):
+		w.release(workCtx, n, w.cfg.BreakerOpenTimeout, ReleaseBreakerOpen)
+		return
+	case errors.Is(err, gobreaker.ErrTooManyRequests): // half-open, and its single probe is in flight
+		w.release(workCtx, n, w.cfg.PollInterval, ReleaseBreakerHalfOpen)
 		return
 	}
 
@@ -168,9 +198,13 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 		attempt.Error = &msg
 	}
 
-	var storeErr error
+	var (
+		storeErr error
+		result   Result
+	)
 	switch {
 	case outcome == domain.OutcomeSuccess:
+		result = ResultSent
 		var msgID *string
 		if reply.MessageID != "" {
 			msgID = &reply.MessageID
@@ -179,34 +213,44 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 		w.log.InfoContext(ctx, "notification sent", "attempt", n.Attempts, "duration_ms", duration.Milliseconds())
 
 	case outcome == domain.OutcomeRetryableError && n.Attempts < n.MaxAttempts:
+		result = ResultRetry
 		delay := w.cfg.Retry.Delay(n.Attempts, reply.RetryAfter, w.randN)
 		storeErr = w.queue.ScheduleRetry(workCtx, n, delay, attempt)
 		w.log.WarnContext(ctx, "delivery failed, retry scheduled",
 			"attempt", n.Attempts, "max_attempts", n.MaxAttempts, "retry_in", delay.String(), "reason", *attempt.Error)
 
 	default: // permanent error, or retryable with no attempts left
+		result = ResultFailed
 		storeErr = w.queue.MarkFailed(workCtx, n, attempt)
 		w.log.ErrorContext(ctx, "delivery failed permanently",
 			"attempt", n.Attempts, "max_attempts", n.MaxAttempts, "outcome", string(outcome), "reason", *attempt.Error)
 	}
 
-	if errors.Is(storeErr, domain.ErrLeaseLost) {
+	switch {
+	case errors.Is(storeErr, domain.ErrLeaseLost):
+		result = ResultLeaseLost
 		w.log.WarnContext(ctx, "lease lost before recording the outcome; newer attempt owns the notification")
-	} else if storeErr != nil {
+	case storeErr != nil:
+		result = ResultStoreError
 		// The lease will expire and the reaper will return the row to the queue.
 		w.log.ErrorContext(ctx, "recording outcome failed", "error", storeErr)
+	case result == ResultSent:
+		// Worker clock vs. database timestamps: clamp the rare, small skew to zero.
+		w.metrics.Delivered(w.cfg.Channel, max(time.Since(dueAt(n)), 0))
 	}
+	w.metrics.AttemptFinished(w.cfg.Channel, outcome, result, duration)
 }
 
-func (w *Worker) release(ctx context.Context, n domain.Notification, delay time.Duration, reason string) {
+func (w *Worker) release(ctx context.Context, n domain.Notification, delay time.Duration, reason ReleaseReason) {
+	w.metrics.Released(w.cfg.Channel, reason)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := w.queue.Release(ctx, n, delay); err != nil && !errors.Is(err, domain.ErrLeaseLost) {
-		w.log.ErrorContext(ctx, "release failed", "error", err, "notification_id", n.ID.String(), "reason", reason)
+		w.log.ErrorContext(ctx, "release failed", "error", err, "notification_id", n.ID.String(), "reason", string(reason))
 	}
 }
 
-func (w *Worker) releaseAll(ns []domain.Notification, delay time.Duration, reason string) {
+func (w *Worker) releaseAll(ns []domain.Notification, delay time.Duration, reason ReleaseReason) {
 	for _, n := range ns {
 		w.release(context.Background(), n, delay, reason)
 	}

@@ -33,6 +33,9 @@ const (
 	PriorityLow    Priority = 2
 )
 
+// Priorities lists every priority, highest first.
+var Priorities = []Priority{PriorityHigh, PriorityNormal, PriorityLow}
+
 // ParsePriority converts external input into a Priority. Empty input means normal.
 func ParsePriority(s string) (Priority, error) {
 	switch s {

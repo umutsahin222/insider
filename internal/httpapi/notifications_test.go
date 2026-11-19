@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -133,13 +134,72 @@ var fixedNow = time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 
 func newTestServer(t *testing.T, store *fakeStore, checks map[string]Check) http.Handler {
 	t.Helper()
-	return NewRouter(Deps{
+	return NewRouter(testDeps(store, checks))
+}
+
+func testDeps(store *fakeStore, checks map[string]Check) Deps {
+	return Deps{
 		Store:  store,
 		Rules:  domain.DefaultRules(),
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		Checks: checks,
 		Now:    func() time.Time { return fixedNow },
-	})
+	}
+}
+
+// recordingMetrics captures what the API reports.
+type recordingMetrics struct {
+	mu       sync.Mutex
+	requests []string // "<method> <route> <status>"
+	accepted map[string]int
+}
+
+func (m *recordingMetrics) ObserveRequest(method, route string, status int, _ time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.requests = append(m.requests, method+" "+route+" "+strconv.Itoa(status))
+}
+
+func (m *recordingMetrics) NotificationAccepted(ch domain.Channel, p domain.Priority) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.accepted == nil {
+		m.accepted = map[string]int{}
+	}
+	m.accepted[string(ch)+"/"+p.String()]++
+}
+
+func TestMetrics(t *testing.T) {
+	m := &recordingMetrics{}
+	deps := testDeps(newFakeStore(), nil)
+	deps.Metrics = m
+	deps.MetricsHandler = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "# metrics") })
+	h := NewRouter(deps)
+
+	created := decode[notificationResponse](t, do(t, h, http.MethodPost, "/v1/notifications", validBody, "Idempotency-Key", "m-1"))
+	do(t, h, http.MethodPost, "/v1/notifications", validBody, "Idempotency-Key", "m-1") // replay: not counted
+	do(t, h, http.MethodPost, "/v1/notifications/batch",
+		`{"items":[{"channel":"push","recipient":"tok","content":"a","priority":"low"},{"channel":"push","recipient":"tok","content":"b","priority":"low"}]}`)
+	do(t, h, http.MethodGet, "/v1/notifications/"+created.ID.String(), "")
+	do(t, h, http.MethodGet, "/nope", "")
+	if rec := do(t, h, http.MethodGet, "/metrics", ""); rec.Code != http.StatusOK || rec.Body.String() != "# metrics" {
+		t.Errorf("/metrics = %d %q", rec.Code, rec.Body)
+	}
+
+	if m.accepted["sms/high"] != 1 || m.accepted["push/low"] != 2 || len(m.accepted) != 2 {
+		t.Errorf("accepted = %v, want sms/high:1 push/low:2", m.accepted)
+	}
+	want := []string{
+		"POST /v1/notifications 201",
+		"POST /v1/notifications 200",
+		"POST /v1/notifications/batch 201",
+		"GET /v1/notifications/{id} 200", // the pattern, never the raw ID
+		"GET unmatched 404",
+		"GET /metrics 200",
+	}
+	if strings.Join(m.requests, "|") != strings.Join(want, "|") {
+		t.Errorf("requests =\n%v\nwant\n%v", m.requests, want)
+	}
 }
 
 func do(t *testing.T, h http.Handler, method, path, body string, headers ...string) *httptest.ResponseRecorder {

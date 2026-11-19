@@ -328,8 +328,22 @@ paths:
       operationId: subscribeStatus
       summary: Real-time status updates (WebSocket)
       description: |
-        Upgrades to a WebSocket and streams `StatusEvent` JSON messages for the given
-        notification or batch. Exactly one of `notification_id` / `batch_id` is required.
+        Upgrades to a WebSocket and streams `StatusEvent` JSON text messages for the given
+        notification or batch. Exactly one of `notification_id` / `batch_id` is required;
+        both are checked before upgrading (`400` / `404`).
+
+        1. On connect the server sends a **snapshot**: one event per notification with its
+           current state (a batch sends one per item).
+        2. Then it forwards **live events** (`processing`, `sent`, `pending` after a failed
+           attempt or a release, `failed`, `cancelled`). An event can repeat a snapshot state;
+           order events of one notification by `attempts`.
+        3. If the server cannot guarantee completeness — the client fell behind, the API lost
+           its Redis subscription, or the API is shutting down — it closes with status
+           **1013 (Try Again Later)**. Reconnect to receive a fresh snapshot.
+
+        The server never expects client messages and pings every 30 s. Browser clients from
+        other origins must be allowed via `WS_ALLOWED_ORIGINS`. Example:
+        `curl --no-buffer "ws://localhost:8080/v1/ws?batch_id=<id>"`.
       parameters:
         - name: notification_id
           in: query
@@ -344,6 +358,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/StatusEvent' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
 
   /healthz:
     get:
@@ -387,6 +402,7 @@ paths:
         - `notification_queue_stats_up`
         - `notifications_accepted_total{channel,priority}`
         - `http_requests_total{method,route,status}`, `http_request_duration_seconds{method,route}`
+        - `websocket_connections` – open status streams
 
         Delivery metrics are exposed by each worker on its own `HTTP_ADDR` (default `:9091`):
         `notification_deliveries_total{channel,outcome,result}`,
@@ -710,7 +726,10 @@ components:
 
     StatusEvent:
       type: object
-      required: [notification_id, status, attempts, occurred_at]
+      description: |
+        A notification reached `status`. `error` explains a failed attempt (`pending` after a
+        retryable failure, or `failed`). Published best-effort; the database stays the truth.
+      required: [notification_id, batch_id, status, attempts, error, occurred_at]
       properties:
         notification_id: { type: string, format: uuid }
         batch_id: { type: [string, 'null'], format: uuid }

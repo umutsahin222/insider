@@ -44,6 +44,8 @@ type API struct {
 	ShutdownTimeout time.Duration
 	Rules           domain.Rules
 	Tracing         Tracing
+	// WebSocketOrigins lists extra browser origins (host patterns) allowed to open /v1/ws.
+	WebSocketOrigins []string
 }
 
 // LoadAPI reads the API configuration from the environment.
@@ -55,12 +57,13 @@ func loadAPI(lookup func(string) (string, bool)) (API, error) {
 	e := env{lookup: lookup}
 	rules := domain.DefaultRules()
 	cfg := API{
-		HTTPAddr:        e.str("HTTP_ADDR", ":8080"),
-		DatabaseURL:     e.str("DATABASE_URL", "postgres://notify:notify@localhost:5432/notify?sslmode=disable"),
-		RedisURL:        e.str("REDIS_URL", "redis://localhost:6379/0"),
-		LogLevel:        e.level("LOG_LEVEL", slog.LevelInfo),
-		ShutdownTimeout: e.duration("SHUTDOWN_TIMEOUT", 15*time.Second),
-		Tracing:         e.tracing("notification-api"),
+		HTTPAddr:         e.str("HTTP_ADDR", ":8080"),
+		DatabaseURL:      e.str("DATABASE_URL", "postgres://notify:notify@localhost:5432/notify?sslmode=disable"),
+		RedisURL:         e.str("REDIS_URL", "redis://localhost:6379/0"),
+		LogLevel:         e.level("LOG_LEVEL", slog.LevelInfo),
+		ShutdownTimeout:  e.duration("SHUTDOWN_TIMEOUT", 15*time.Second),
+		Tracing:          e.tracing("notification-api"),
+		WebSocketOrigins: e.list("WS_ALLOWED_ORIGINS"),
 		Rules: domain.Rules{
 			MaxContentLength: map[domain.Channel]int{
 				domain.ChannelSMS:   e.int("SMS_MAX_LENGTH", rules.MaxContentLength[domain.ChannelSMS]),
@@ -207,6 +210,21 @@ func (e *env) int(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+// list splits a comma-separated variable, dropping empty entries.
+func (e *env) list(key string) []string {
+	v, ok := e.lookup(key)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, s := range strings.Split(v, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (e *env) float(key string, def float64) float64 {

@@ -18,6 +18,9 @@ func TestLoadAPI_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.WebSocketOrigins != nil {
+		t.Errorf("WS origins default = %v, want none", cfg.WebSocketOrigins)
+	}
 	if cfg.Tracing.OTLPEndpoint != "" || cfg.Tracing.ServiceName != "notification-api" || cfg.Tracing.SampleRatio != 1 {
 		t.Errorf("tracing defaults = %+v, want disabled, notification-api, ratio 1", cfg.Tracing)
 	}

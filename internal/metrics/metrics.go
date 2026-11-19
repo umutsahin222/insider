@@ -35,9 +35,10 @@ func MetricsHandler(reg *prometheus.Registry) http.Handler {
 
 // HTTPMetrics instruments the HTTP API; it implements httpapi.Metrics.
 type HTTPMetrics struct {
-	requests *prometheus.CounterVec
-	duration *prometheus.HistogramVec
-	accepted *prometheus.CounterVec
+	requests  *prometheus.CounterVec
+	duration  *prometheus.HistogramVec
+	accepted  *prometheus.CounterVec
+	websocket prometheus.Gauge
 }
 
 // NewHTTPMetrics registers the HTTP API metrics with reg.
@@ -56,10 +57,17 @@ func NewHTTPMetrics(reg prometheus.Registerer) *HTTPMetrics {
 			Name: "notifications_accepted_total",
 			Help: "Notifications accepted into the queue, by channel and priority.",
 		}, []string{"channel", "priority"}),
+		websocket: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "websocket_connections",
+			Help: "Open WebSocket status streams.",
+		}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.accepted)
+	reg.MustRegister(m.requests, m.duration, m.accepted, m.websocket)
 	return m
 }
+
+// WebSocketConnections tracks open status streams.
+func (m *HTTPMetrics) WebSocketConnections(delta int) { m.websocket.Add(float64(delta)) }
 
 // ObserveRequest records one HTTP request. route must be a pattern ("/v1/notifications/{id}"),
 // never a raw path, or every ID would become its own time series.

@@ -93,9 +93,20 @@ func (s *fakeStore) ListAttempts(context.Context, uuid.UUID) ([]domain.DeliveryA
 }
 
 func (s *fakeStore) ListNotifications(_ context.Context, f domain.ListFilter) (domain.Page, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.lastLF = f
 	if s.listErr != nil {
 		return domain.Page{}, s.listErr
+	}
+	if f.BatchID != nil { // a single, final page with the batch's notifications
+		var items []domain.Notification
+		for _, n := range s.byID {
+			if n.BatchID != nil && *n.BatchID == *f.BatchID {
+				items = append(items, n)
+			}
+		}
+		return domain.Page{Items: items}, nil
 	}
 	return domain.Page{Next: &domain.Cursor{CreatedAt: time.UnixMicro(1_700_000_000_000_001), ID: uuid.MustParse("01890000-0000-7000-8000-000000000001")}}, nil
 }
@@ -222,6 +233,8 @@ func (m *recordingMetrics) ObserveRequest(method, route string, status int, _ ti
 	defer m.mu.Unlock()
 	m.requests = append(m.requests, method+" "+route+" "+strconv.Itoa(status))
 }
+
+func (m *recordingMetrics) WebSocketConnections(int) {}
 
 func (m *recordingMetrics) NotificationAccepted(ch domain.Channel, p domain.Priority) {
 	m.mu.Lock()

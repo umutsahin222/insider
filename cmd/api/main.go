@@ -72,6 +72,11 @@ func run() error {
 	reg := metrics.NewRegistry()
 	reg.MustRegister(metrics.NewQueueCollector(store, queueStatsTimeout, queueStatsCache, log.With("component", "queue_metrics")))
 
+	// One Redis subscription per process fans status events out to WebSocket clients. It
+	// stops with ctx (on SIGTERM), which closes every stream with "try again later".
+	hub := events.NewHub(rdb, log.With("component", "event_hub"))
+	go hub.Run(ctx)
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Store:  store,
 		Rules:  cfg.Rules,
@@ -80,11 +85,13 @@ func run() error {
 			"postgres": store.Ping,
 			"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 		},
-		Metrics:        metrics.NewHTTPMetrics(reg),
-		MetricsHandler: metrics.MetricsHandler(reg),
-		Stats:          store,
-		Events:         events.NewPublisher(rdb, log.With("component", "events")),
-		Tracing:        tracing,
+		Metrics:          metrics.NewHTTPMetrics(reg),
+		MetricsHandler:   metrics.MetricsHandler(reg),
+		Stats:            store,
+		Events:           events.NewPublisher(rdb, log.With("component", "events")),
+		Stream:           hub,
+		WebSocketOrigins: cfg.WebSocketOrigins,
+		Tracing:          tracing,
 	})
 
 	srv := &http.Server{

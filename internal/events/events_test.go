@@ -106,7 +106,7 @@ func TestHub_SlowSubscriberIsDroppedNotWaitedFor(t *testing.T) {
 func TestHub_DropAllClosesEverySubscription(t *testing.T) {
 	h := NewHub(nil, discard)
 	s1, s2 := h.Subscribe(forID(uuid.New()), 1), h.Subscribe(forID(uuid.New()), 1)
-	h.dropAll()
+	h.DropAll()
 	for _, s := range []*Subscription{s1, s2} {
 		if _, open := <-s.Events(); open {
 			t.Error("subscription still open after dropAll")

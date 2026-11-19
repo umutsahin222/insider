@@ -168,8 +168,8 @@ func (h *Hub) Dispatch(ev domain.StatusEvent) {
 	}
 }
 
-// dropAll closes every subscription, forcing consumers to resynchronise.
-func (h *Hub) dropAll() {
+// DropAll closes every subscription, forcing consumers to resynchronise.
+func (h *Hub) DropAll() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for s := range h.subs {
@@ -186,7 +186,7 @@ func (h *Hub) Run(ctx context.Context) {
 		msg, err := ps.ReceiveTimeout(ctx, h.idle)
 		if err != nil {
 			if ctx.Err() != nil {
-				h.dropAll()
+				h.DropAll() // shutting down: tell WebSocket clients to reconnect elsewhere
 				return
 			}
 			var netErr net.Error
@@ -196,7 +196,7 @@ func (h *Hub) Run(ctx context.Context) {
 				}
 			}
 			h.log.Warn("event subscription lost; dropping subscribers and reconnecting", "error", err)
-			h.dropAll()
+			h.DropAll()
 			select {
 			case <-ctx.Done():
 				return

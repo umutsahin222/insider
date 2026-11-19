@@ -51,12 +51,15 @@ type Metrics interface {
 	ObserveRequest(method, route string, status int, d time.Duration)
 	// NotificationAccepted counts one newly queued notification (not idempotent replays).
 	NotificationAccepted(ch domain.Channel, p domain.Priority)
+	// WebSocketConnections tracks open status streams (+1 on open, -1 on close).
+	WebSocketConnections(delta int)
 }
 
 type nopMetrics struct{}
 
 func (nopMetrics) ObserveRequest(string, string, int, time.Duration)    {}
 func (nopMetrics) NotificationAccepted(domain.Channel, domain.Priority) {}
+func (nopMetrics) WebSocketConnections(int)                             {}
 
 // Deps are the explicit dependencies of the HTTP API.
 type Deps struct {
@@ -75,6 +78,11 @@ type Deps struct {
 	Stats StatsStore
 	// Events announces cancellations and manual retries; nil publishes nothing.
 	Events Events
+	// Stream, if set, serves GET /v1/ws (live status over WebSocket).
+	Stream EventStream
+	// WebSocketOrigins are extra browser origins allowed to open /v1/ws (same-origin and
+	// non-browser clients are always allowed).
+	WebSocketOrigins []string
 	// Tracing creates a server span per request and its context is stored with every
 	// notification for the worker to continue; nil propagates context without recording.
 	Tracing *observability.Tracing
@@ -94,6 +102,8 @@ type api struct {
 	metrics    Metrics
 	stats      StatsStore
 	events     Events
+	stream     EventStream
+	wsOrigins  []string
 	propagator propagation.TextMapPropagator
 }
 
@@ -110,6 +120,7 @@ func NewRouter(d Deps) http.Handler {
 	if a.events == nil {
 		a.events = nopEvents{}
 	}
+	a.stream, a.wsOrigins = d.Stream, d.WebSocketOrigins
 	tracing := d.Tracing
 	if tracing == nil {
 		tracing = observability.DisabledTracing()
@@ -139,6 +150,9 @@ func NewRouter(d Deps) http.Handler {
 		if a.stats != nil {
 			r.Get("/stats", a.getStats)
 		}
+		if a.stream != nil {
+			r.Get("/ws", a.subscribeStatus)
+		}
 	})
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
@@ -158,6 +172,8 @@ func NewRouter(d Deps) http.Handler {
 			switch r.URL.Path {
 			case "/healthz", "/readyz", "/metrics":
 				return false // probes and scrapes would drown real traces
+			case "/v1/ws":
+				return false // a span lasting as long as the connection says nothing useful
 			}
 			return true
 		}),

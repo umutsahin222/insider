@@ -21,14 +21,25 @@ how to keep validation meaningful, and how to keep user-supplied templates safe 
   what it rendered. A changed message is a new template name.
 - **One lookup per request:** the API collects the distinct template names of a request (up to
   1000 items) and loads them in one query; the domain renders.
-- **Safe execution of user-supplied bodies:** Go `text/template` with only string variables (no
-  callable data), bodies must parse at creation and are capped at 20 KB, rendering output is capped
-  at 64 KiB (a self-recursive template would otherwise build a huge string before text/template's
-  depth limit stops it), and render errors are truncated so they cannot echo unbounded input.
+- **Safe execution of user-supplied bodies: a restricted subset of `text/template`.** Templates
+  are written by API callers and run inside the API request, so rendering must be bounded work.
+  An output cap alone is not enough: `{{range 100000}}{{range 100000}}{{end}}{{end}}` writes
+  nothing and spins for minutes, branching `define`/`template` recursion is exponential, and
+  `printf "%099999999d"` allocates a gigabyte before anything is written. At creation (and again
+  before rendering) the parse tree is checked against an allowlist: text, comments, variables,
+  literals, `if`/`else`/`with`, and the pure functions `eq ne lt le gt ge and or not len index`.
+  `range`, `define`/`template`/`block`, `break`/`continue`, `print*`, `call`, `slice`, `html`,
+  `js` and `urlquery` are rejected with a 422 on `body`. Every node then runs at most once, so
+  rendering is linear in template size (≤ 20 KB) and variable size (≤ 64 KiB, string values
+  only, no callable data); output is capped at 64 KiB and render errors are truncated so they
+  cannot echo unbounded input. Found by the phase 7 code review; the earlier design relied on
+  the output cap and text/template's recursion depth limit.
 
 ## Consequences
 - + Delivery is unaffected by templates; a template typo is caught at request time, not by a
   worker hours later.
-- − Re-parsing per item costs microseconds; a per-request cache of parsed templates would remove
-  it if profiles ever showed it.
+- + A batch parses each distinct template once: the API shares one `*Template` per name across
+  the batch's items and the parsed tree is cached on it.
+- − No loops: list-shaped content (e.g. order lines) must be rendered by the caller into a single
+  variable. That fits notification texts, which are short by channel limits anyway.
 - − No localisation or per-channel variants; those would be separate templates.

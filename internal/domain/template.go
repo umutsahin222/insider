@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strings"
 	"text/template"
+	"text/template/parse"
 	"time"
 )
 
@@ -15,12 +16,21 @@ var (
 
 const (
 	maxTemplateBody = 20_000
-	// maxRenderedBytes bounds rendering output before content validation sees it, so a
-	// template like {{range}}…{{end}} cannot make the API build arbitrarily large strings.
+	// maxRenderedBytes bounds rendering output before content validation sees it.
 	maxRenderedBytes = 64 << 10
+	// maxVariableBytes bounds the variables of one render (names and values together), so
+	// every allowed action works on a bounded input.
+	maxVariableBytes = 64 << 10
 	// maxRenderError caps rendering error messages, which can quote variable values.
 	maxRenderError = 200
 )
+
+// allowedFuncs are the template functions a body may call: pure, and linear in their
+// arguments. Everything else text/template offers is rejected at creation (see checkSubset).
+var allowedFuncs = map[string]bool{
+	"eq": true, "ne": true, "lt": true, "le": true, "gt": true, "ge": true,
+	"and": true, "or": true, "not": true, "len": true, "index": true,
+}
 
 // TemplateRef selects a template by name in a create request. Resolved is filled in by the
 // caller (the API looks templates up in the store) and is nil if no such template exists.
@@ -58,10 +68,25 @@ func NewTemplate(name, channel, body string, now time.Time) (Template, error) {
 }
 
 // Render executes the template with vars. Every placeholder must have a variable.
-func (t Template) Render(vars map[string]string) (string, error) {
-	tmpl, err := parseTemplate(t.Name, t.Body)
-	if err != nil {
-		return "", err
+// The parsed body is cached on t; Render is not safe for concurrent use of one *Template.
+func (t *Template) Render(vars map[string]string) (string, error) {
+	if t.parsed == nil {
+		tmpl, err := parseTemplate(t.Name, t.Body)
+		if err != nil {
+			return "", err
+		}
+		t.parsed = tmpl
+	}
+	return render(t.parsed, vars)
+}
+
+func render(tmpl *template.Template, vars map[string]string) (string, error) {
+	size := 0
+	for k, v := range vars {
+		size += len(k) + len(v)
+	}
+	if size > maxVariableBytes {
+		return "", errors.New("variables exceed " + itoa(maxVariableBytes) + " bytes")
 	}
 	if vars == nil {
 		vars = map[string]string{}
@@ -83,8 +108,89 @@ func (t Template) Render(vars map[string]string) (string, error) {
 	return out.String(), nil
 }
 
+// parseTemplate parses body and checks it stays within the supported subset.
 func parseTemplate(name, body string) (*template.Template, error) {
-	return template.New(name).Option("missingkey=error").Parse(body)
+	tmpl, err := template.New(name).Option("missingkey=error").Parse(body)
+	if err != nil {
+		return nil, err
+	}
+	if len(tmpl.Templates()) > 1 {
+		return nil, errors.New("define, block and template are not supported")
+	}
+	if err := checkSubset(tmpl.Root); err != nil {
+		return nil, err
+	}
+	return tmpl, nil
+}
+
+// checkSubset accepts variable substitution with light logic: {{.name}}, variables, literals,
+// if/else, with, and the functions in allowedFuncs. It rejects what could make rendering
+// cost unbounded work on the API: range (loops over integers or nested loops over the
+// variables), define/template (recursion), break/continue, and functions that build large
+// values from small inputs (printf "%099999999d", print, call, slice, html, js, urlquery).
+// With this subset every node runs at most once, so rendering is linear in template and
+// variable size.
+func checkSubset(n parse.Node) error {
+	switch n := n.(type) {
+	case nil:
+		return nil
+	case *parse.ListNode:
+		if n == nil {
+			return nil
+		}
+		for _, c := range n.Nodes {
+			if err := checkSubset(c); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *parse.TextNode, *parse.CommentNode, *parse.FieldNode, *parse.VariableNode,
+		*parse.DotNode, *parse.StringNode, *parse.NumberNode, *parse.BoolNode, *parse.NilNode:
+		return nil
+	case *parse.ActionNode:
+		return checkSubset(n.Pipe)
+	case *parse.IfNode:
+		return checkBranch(&n.BranchNode)
+	case *parse.WithNode:
+		return checkBranch(&n.BranchNode)
+	case *parse.PipeNode:
+		if n == nil {
+			return nil
+		}
+		for _, cmd := range n.Cmds {
+			for _, arg := range cmd.Args {
+				if err := checkSubset(arg); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	case *parse.ChainNode:
+		return checkSubset(n.Node)
+	case *parse.IdentifierNode:
+		if !allowedFuncs[n.Ident] {
+			return errors.New("function " + n.Ident + " is not supported")
+		}
+		return nil
+	case *parse.RangeNode:
+		return errors.New("range is not supported")
+	case *parse.TemplateNode:
+		return errors.New("define, block and template are not supported")
+	case *parse.BreakNode, *parse.ContinueNode:
+		return errors.New("break and continue are not supported")
+	default:
+		return errors.New("unsupported template construct")
+	}
+}
+
+func checkBranch(b *parse.BranchNode) error {
+	if err := checkSubset(b.Pipe); err != nil {
+		return err
+	}
+	if err := checkSubset(b.List); err != nil {
+		return err
+	}
+	return checkSubset(b.ElseList)
 }
 
 var errRenderTooLarge = errors.New("rendered content exceeds " + itoa(maxRenderedBytes) + " bytes")

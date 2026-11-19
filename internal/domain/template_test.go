@@ -28,6 +28,17 @@ func TestNewTemplate(t *testing.T) {
 		{"unparsable body", "otp", "sms", "Hi {{.name", []string{"body"}},
 		{"too long", "otp", "email", strings.Repeat("x", maxTemplateBody+1), []string{"body"}},
 		{"everything wrong", "", "", "", []string{"name", "channel", "body"}},
+		// Constructs that could make rendering unbounded work are rejected at creation.
+		{"range over int", "otp", "sms", "{{range 100000}}{{range 100000}}{{end}}{{end}}x", []string{"body"}},
+		{"range over variables", "otp", "sms", "{{range .}}{{.}}{{end}}", []string{"body"}},
+		{"recursion", "otp", "sms", `{{define "a"}}{{template "a" .}}{{end}}{{template "a" .}}`, []string{"body"}},
+		{"block", "otp", "sms", `{{block "a" .}}x{{end}}`, []string{"body"}},
+		{"printf width", "otp", "sms", `{{printf "%099999999d" 1}}`, []string{"body"}},
+		{"print", "otp", "sms", `{{print .a .a .a}}`, []string{"body"}},
+		{"call", "otp", "sms", `{{call .f}}`, []string{"body"}},
+		{"disallowed func in if", "otp", "sms", `{{if slice .a 1}}x{{end}}`, []string{"body"}},
+		{"disallowed func nested", "otp", "sms", `{{eq (html .a) "x"}}`, []string{"body"}},
+		{"disallowed func in else", "otp", "sms", `{{if .a}}x{{else}}{{js .a}}{{end}}`, []string{"body"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -36,6 +47,21 @@ func TestNewTemplate(t *testing.T) {
 				t.Errorf("fields = %v, want %v", got, tt.wantFields)
 			}
 		})
+	}
+}
+
+func TestNewTemplate_SupportedSubset(t *testing.T) {
+	tmpl := mustTemplate(t, "subset", "email",
+		`{{/* greeting */}}{{$n := .name}}Hi {{$n}}`+
+			`{{if eq .tier "gold"}}, thanks for being gold{{else if .tier}}, tier {{.tier}}{{end}}`+
+			`{{with .coupon}} (code {{.}}){{end}}`+
+			`{{if and (gt (len .name) 2) (not (eq .name "Bob"))}}!{{end}} {{index . "name"}}`)
+	got, err := tmpl.Render(map[string]string{"name": "Ada", "tier": "gold", "coupon": "X1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "Hi Ada, thanks for being gold (code X1)! Ada"; got != want {
+		t.Errorf("Render = %q, want %q", got, want)
 	}
 }
 
@@ -53,23 +79,31 @@ func TestTemplateRender(t *testing.T) {
 		t.Error("nil variables must report the missing ones")
 	}
 
-	// Output is bounded before content validation ever sees it.
-	// A self-recursive template would otherwise build a huge string before text/template's
-	// depth limit stops it.
-	bomb := mustTemplate(t, "bomb", "email", `{{define "a"}}{{.x}}{{template "a" .}}{{end}}{{template "a" .}}`)
-	if _, err := bomb.Render(map[string]string{"x": strings.Repeat("a", 1000)}); err == nil ||
-		!strings.Contains(err.Error(), "exceeds") {
+	// Output and variables are bounded before content validation ever sees them.
+	many := mustTemplate(t, "many", "email", strings.Repeat("{{.x}}", 100))
+	if _, err := many.Render(map[string]string{"x": strings.Repeat("a", 1000)}); err == nil ||
+		!strings.Contains(err.Error(), "rendered content exceeds") {
 		t.Errorf("oversized render: err = %v", err)
+	}
+	if _, err := many.Render(map[string]string{"x": strings.Repeat("a", maxVariableBytes)}); err == nil ||
+		!strings.Contains(err.Error(), "variables exceed") {
+		t.Errorf("oversized variables: err = %v", err)
 	}
 
 	// Error messages are returned to clients: they must not echo unbounded input back.
-	bad := mustTemplate(t, "bad", "email", `{{range .x}}{{end}}`) // "range can't iterate over <value>"
+	bad := mustTemplate(t, "bad", "email", `{{index .x 99999}}`) // "can't index item of type string"
 	_, err = bad.Render(map[string]string{"x": strings.Repeat("a", 10_000)})
 	if err == nil {
-		t.Fatal("ranging over a string must fail")
+		t.Fatal("indexing a string variable must fail")
 	}
 	if len(err.Error()) > maxRenderError+40 {
 		t.Errorf("error = %d bytes, want it truncated", len(err.Error()))
+	}
+
+	// A stored template that predates a subset change still cannot run unsupported constructs.
+	legacy := Template{Name: "legacy", Channel: ChannelSMS, Body: "{{range 3}}x{{end}}"}
+	if _, err := legacy.Render(nil); err == nil || !strings.Contains(err.Error(), "range is not supported") {
+		t.Errorf("legacy range: err = %v", err)
 	}
 }
 

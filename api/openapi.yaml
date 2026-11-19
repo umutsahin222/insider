@@ -288,9 +288,14 @@ paths:
       operationId: createTemplate
       summary: Create a message template
       description: |
-        Bodies use Go `text/template` syntax, e.g. `Your code is {{.code}}`; the body must parse.
-        Missing variables at render time are a validation error. Templates are immutable (there
-        is no update): existing notifications keep referring to exactly what they rendered.
+        Bodies use a subset of Go `text/template` syntax, e.g. `Your code is {{.code}}`:
+        variables (`{{.name}}`, `{{index . "name"}}`, `{{$v := .name}}`), literals, comments,
+        `if`/`else`/`with`, and the functions `eq ne lt le gt ge and or not len index`.
+        `range`, `define`/`template`/`block`, `break`/`continue` and other functions are
+        rejected (422 on `body`) so rendering stays linear in template and variable size.
+        Missing variables at render time are a validation error; variables may total 64 KiB and
+        rendered output 64 KiB. Templates are immutable (there is no update): existing
+        notifications keep referring to exactly what they rendered.
       requestBody:
         required: true
         content:
@@ -712,7 +717,7 @@ components:
       properties:
         name: { type: string, pattern: '^[a-z0-9_-]{1,64}$' }
         channel: { $ref: '#/components/schemas/Channel' }
-        body: { type: string }
+        body: { type: string, maxLength: 20000, description: 'Template body in the supported subset (see createTemplate).' }
 
     Template:
       type: object

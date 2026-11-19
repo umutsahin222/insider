@@ -85,11 +85,14 @@ func (a *api) resolveTemplates(ctx context.Context, inputs []domain.CreateInput)
 	if err != nil {
 		return err
 	}
+	// One *Template per name, so the domain parses each template once per request.
+	shared := make(map[string]*domain.Template, len(found))
+	for name, t := range found {
+		shared[name] = &t
+	}
 	for i := range inputs {
 		if ref := inputs[i].Template; ref != nil {
-			if t, ok := found[ref.Name]; ok {
-				ref.Resolved = &t
-			}
+			ref.Resolved = shared[ref.Name] // nil if there is no such template
 		}
 	}
 	return nil

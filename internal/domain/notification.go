@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"text/template"
 	"time"
 
 	"github.com/google/uuid"
@@ -78,6 +79,10 @@ type Template struct {
 	Channel   Channel
 	Body      string
 	CreatedAt time.Time
+
+	// parsed caches the parsed body after the first Render, so a batch that uses one
+	// template many times parses it once (share one *Template across the batch's refs).
+	parsed *template.Template
 }
 
 // CreateInput is the raw, unvalidated request to create a notification.

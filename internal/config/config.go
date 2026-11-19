@@ -14,6 +14,27 @@ import (
 	"github.com/umutsahin222/insider/internal/domain"
 )
 
+// Tracing configures OpenTelemetry, using the standard OTEL_* variable names where they exist.
+type Tracing struct {
+	// OTLPEndpoint is the OTLP/HTTP collector base URL (e.g. http://jaeger:4318); empty
+	// disables exporting, while trace context is still propagated.
+	OTLPEndpoint string
+	ServiceName  string
+	SampleRatio  float64
+}
+
+func (e *env) tracing(defaultService string) Tracing {
+	t := Tracing{
+		OTLPEndpoint: e.str("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		ServiceName:  e.str("OTEL_SERVICE_NAME", defaultService),
+		SampleRatio:  e.float("TRACE_SAMPLE_RATIO", 1),
+	}
+	if t.SampleRatio < 0 || t.SampleRatio > 1 {
+		e.errs = append(e.errs, errors.New("TRACE_SAMPLE_RATIO must be in [0, 1]"))
+	}
+	return t
+}
+
 // API is the configuration of cmd/api.
 type API struct {
 	HTTPAddr        string
@@ -22,6 +43,7 @@ type API struct {
 	LogLevel        slog.Level
 	ShutdownTimeout time.Duration
 	Rules           domain.Rules
+	Tracing         Tracing
 }
 
 // LoadAPI reads the API configuration from the environment.
@@ -38,6 +60,7 @@ func loadAPI(lookup func(string) (string, bool)) (API, error) {
 		RedisURL:        e.str("REDIS_URL", "redis://localhost:6379/0"),
 		LogLevel:        e.level("LOG_LEVEL", slog.LevelInfo),
 		ShutdownTimeout: e.duration("SHUTDOWN_TIMEOUT", 15*time.Second),
+		Tracing:         e.tracing("notification-api"),
 		Rules: domain.Rules{
 			MaxContentLength: map[domain.Channel]int{
 				domain.ChannelSMS:   e.int("SMS_MAX_LENGTH", rules.MaxContentLength[domain.ChannelSMS]),
@@ -92,6 +115,8 @@ type Worker struct {
 	BreakerMinRequests  int
 	BreakerWindow       time.Duration
 	BreakerOpenTimeout  time.Duration
+
+	Tracing Tracing
 }
 
 // LoadWorker reads the worker configuration from the environment.
@@ -129,6 +154,8 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 		BreakerMinRequests:  e.int("BREAKER_MIN_REQUESTS", 20),
 		BreakerWindow:       e.duration("BREAKER_WINDOW", 10*time.Second),
 		BreakerOpenTimeout:  e.duration("BREAKER_OPEN_TIMEOUT", 30*time.Second),
+
+		Tracing: e.tracing("notification-worker"),
 	}
 	for name, v := range map[string]int{
 		"WORKER_CONCURRENCY": cfg.Concurrency, "CLAIM_BATCH_SIZE": cfg.ClaimBatchSize,

@@ -30,7 +30,7 @@ func TestSend(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	reply, err := New(srv.URL, time.Second).Send(context.Background(), n)
+	reply, err := New(srv.URL, time.Second, nil).Send(context.Background(), n)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestSend_ErrorStatusesAreRepliesNotErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	reply, err := New(srv.URL, time.Second).Send(context.Background(), domain.Notification{ID: uuid.New()})
+	reply, err := New(srv.URL, time.Second, nil).Send(context.Background(), domain.Notification{ID: uuid.New()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestSend_TimeoutIsAnError(t *testing.T) {
 	defer srv.Close()
 	defer close(release) // runs before srv.Close, so the handler returns and Close doesn't block
 
-	_, err := New(srv.URL, 50*time.Millisecond).Send(context.Background(), domain.Notification{ID: uuid.New()})
+	_, err := New(srv.URL, 50*time.Millisecond, nil).Send(context.Background(), domain.Notification{ID: uuid.New()})
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}

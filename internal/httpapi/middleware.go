@@ -10,6 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
+	semconv "go.opentelemetry.io/otel/semconv/v1.43.0"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/umutsahin222/insider/internal/observability"
 )
@@ -50,6 +52,10 @@ func (a *api) observe(next http.Handler) http.Handler {
 			status = http.StatusOK
 		}
 		a.metrics.ObserveRequest(r.Method, route, status, elapsed)
+		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+			span.SetName(r.Method + " " + route)
+			span.SetAttributes(semconv.HTTPRoute(route))
+		}
 
 		level := a.log.InfoContext
 		switch route {

@@ -18,6 +18,9 @@ func TestLoadAPI_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.Tracing.OTLPEndpoint != "" || cfg.Tracing.ServiceName != "notification-api" || cfg.Tracing.SampleRatio != 1 {
+		t.Errorf("tracing defaults = %+v, want disabled, notification-api, ratio 1", cfg.Tracing)
+	}
 	if cfg.HTTPAddr != ":8080" || cfg.LogLevel != slog.LevelInfo {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
@@ -66,6 +69,7 @@ func TestLoadWorker(t *testing.T) {
 		"breaker ratio above 1":               {"BREAKER_FAILURE_RATIO": "1.5"},
 		"breaker ratio not a number":          {"BREAKER_FAILURE_RATIO": "half"},
 		"zero breaker window":                 {"BREAKER_WINDOW": "0s"},
+		"sample ratio above 1":                {"TRACE_SAMPLE_RATIO": "2"},
 	}
 	for name, env := range tests {
 		if _, err := loadWorker(lookupFrom(env)); err == nil {

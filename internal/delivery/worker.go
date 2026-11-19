@@ -9,6 +9,10 @@ import (
 	"time"
 
 	"github.com/sony/gobreaker/v2"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/umutsahin222/insider/internal/domain"
 	"github.com/umutsahin222/insider/internal/observability"
@@ -49,26 +53,48 @@ type Config struct {
 // Worker delivers the notifications of a single channel. Each channel has its own worker,
 // limiter bucket and circuit breaker, so a slow or failing channel never blocks the others.
 type Worker struct {
-	cfg     Config
-	queue   Queue
-	sender  Sender
-	limiter Limiter
-	metrics Metrics
-	log     *slog.Logger
-	breaker *gobreaker.CircuitBreaker[domain.ProviderReply]
-	randN   func(int64) int64
+	cfg        Config
+	queue      Queue
+	sender     Sender
+	limiter    Limiter
+	metrics    Metrics
+	tracer     trace.Tracer
+	propagator propagation.TextMapPropagator
+	log        *slog.Logger
+	breaker    *gobreaker.CircuitBreaker[domain.ProviderReply]
+	randN      func(int64) int64
+}
+
+// Deps are a worker's collaborators. Metrics and Tracing are optional.
+type Deps struct {
+	Queue   Queue
+	Sender  Sender
+	Limiter Limiter
+	Metrics Metrics
+	// Tracing continues the trace stored with each notification; nil records nothing.
+	Tracing *observability.Tracing
+	Logger  *slog.Logger
 }
 
 // errRetryable marks a send the breaker should count as a failure.
 var errRetryable = errors.New("retryable provider failure")
 
-// NewWorker wires a channel worker. A nil m disables metrics.
-func NewWorker(cfg Config, q Queue, s Sender, l Limiter, m Metrics, log *slog.Logger) *Worker {
+// NewWorker wires a channel worker.
+func NewWorker(cfg Config, d Deps) *Worker {
+	m := d.Metrics
 	if m == nil {
 		m = NopMetrics{}
 	}
-	log = log.With("channel", string(cfg.Channel))
-	w := &Worker{cfg: cfg, queue: q, sender: s, limiter: l, metrics: m, log: log, randN: rand.Int64N}
+	tracing := d.Tracing
+	if tracing == nil {
+		tracing = observability.DisabledTracing()
+	}
+	log := d.Logger.With("channel", string(cfg.Channel))
+	w := &Worker{
+		cfg: cfg, queue: d.Queue, sender: d.Sender, limiter: d.Limiter, metrics: m,
+		tracer: tracing.Provider.Tracer(observability.TracerName), propagator: tracing.Propagator,
+		log: log, randN: rand.Int64N,
+	}
 	w.breaker = gobreaker.NewCircuitBreaker[domain.ProviderReply](gobreaker.Settings{
 		Name:        string(cfg.Channel),
 		MaxRequests: 1, // a single probe in half-open state
@@ -139,6 +165,20 @@ func (w *Worker) loop(ctx context.Context) {
 func (w *Worker) process(ctx context.Context, n domain.Notification) {
 	ctx = observability.WithNotificationID(observability.WithCorrelationID(ctx, n.CorrelationID), n.ID.String())
 
+	// Continue the trace of the request that created the notification: every attempt is a
+	// consumer span under it, so retries line up in one trace.
+	ctx = observability.ExtractTraceContext(ctx, w.propagator, n.TraceContext)
+	ctx, span := w.tracer.Start(ctx, "deliver "+string(w.cfg.Channel),
+		trace.WithSpanKind(trace.SpanKindConsumer),
+		trace.WithAttributes(
+			attribute.String("notification.id", n.ID.String()),
+			attribute.String("notification.channel", string(n.Channel)),
+			attribute.String("notification.priority", n.Priority.String()),
+			attribute.Int("notification.attempt", n.Attempts),
+			attribute.Int("notification.max_attempts", n.MaxAttempts),
+		))
+	defer span.End()
+
 	// The breaker may have opened while this claimed batch was being worked through: hand the
 	// rest back before taking a rate-limit token that another replica could have used.
 	if w.breaker.State() == gobreaker.StateOpen {
@@ -147,7 +187,10 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 	}
 
 	waitStart := time.Now()
-	if err := w.limiter.Wait(ctx, string(w.cfg.Channel)); err != nil {
+	_, waitSpan := w.tracer.Start(ctx, "ratelimit.wait")
+	err := w.limiter.Wait(ctx, string(w.cfg.Channel))
+	waitSpan.End()
+	if err != nil {
 		// Fail closed: without the shared limiter we cannot prove we're under the provider limit.
 		delay := time.Second
 		if ctx.Err() != nil {
@@ -238,10 +281,20 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 		w.metrics.Delivered(w.cfg.Channel, max(time.Since(dueAt(n)), 0))
 	}
 	w.metrics.AttemptFinished(w.cfg.Channel, outcome, result, duration)
+
+	span.SetAttributes(attribute.String("delivery.outcome", string(outcome)), attribute.String("delivery.result", string(result)))
+	if attempt.StatusCode != nil {
+		span.SetAttributes(attribute.Int("http.response.status_code", *attempt.StatusCode))
+	}
+	if outcome != domain.OutcomeSuccess {
+		span.SetStatus(codes.Error, *attempt.Error)
+	}
 }
 
 func (w *Worker) release(ctx context.Context, n domain.Notification, delay time.Duration, reason ReleaseReason) {
 	w.metrics.Released(w.cfg.Channel, reason)
+	trace.SpanFromContext(ctx).SetAttributes(
+		attribute.String("delivery.result", "released"), attribute.String("delivery.release_reason", string(reason)))
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
 	if err := w.queue.Release(ctx, n, delay); err != nil && !errors.Is(err, domain.ErrLeaseLost) {

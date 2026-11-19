@@ -44,6 +44,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	tracing, err := observability.NewTracing(ctx, observability.TracingConfig{
+		ServiceName: cfg.Tracing.ServiceName, OTLPEndpoint: cfg.Tracing.OTLPEndpoint, SampleRatio: cfg.Tracing.SampleRatio,
+	})
+	if err != nil {
+		return err
+	}
+	defer flushTraces(tracing, log)
+
 	pool, err := postgres.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -74,6 +82,7 @@ func run() error {
 		Metrics:        metrics.NewHTTPMetrics(reg),
 		MetricsHandler: metrics.MetricsHandler(reg),
 		Stats:          store,
+		Tracing:        tracing,
 	})
 
 	srv := &http.Server{
@@ -87,7 +96,7 @@ func run() error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("listening", "addr", cfg.HTTPAddr)
+		log.Info("listening", "addr", cfg.HTTPAddr, "tracing", cfg.Tracing.OTLPEndpoint != "")
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
@@ -107,4 +116,13 @@ func run() error {
 		return fmt.Errorf("shutting down: %w", err)
 	}
 	return nil
+}
+
+// flushTraces exports buffered spans before exit.
+func flushTraces(t *observability.Tracing, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := t.Shutdown(ctx); err != nil {
+		log.Warn("flushing traces failed", "error", err)
+	}
 }

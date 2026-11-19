@@ -155,8 +155,10 @@ func newTestWorker(q Queue, s Sender, l Limiter) *Worker {
 	return newMeteredTestWorker(q, s, l, nil)
 }
 
+func testLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+
 func newMeteredTestWorker(q Queue, s Sender, l Limiter, m Metrics) *Worker {
-	w := NewWorker(testConfig(), q, s, l, m, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := NewWorker(testConfig(), Deps{Queue: q, Sender: s, Limiter: l, Metrics: m, Logger: testLogger()})
 	w.randN = func(n int64) int64 { return n - 1 } // deterministic: top of the jitter range
 	return w
 }
@@ -462,7 +464,7 @@ func TestBreaker_RandomFailuresDoNotStopAWorkingChannel(t *testing.T) {
 	// but streaks of 5 happen naturally at 30% — see TestBreakerPolicy for that case.
 	s := &sequenceSender{codes: []int{503, 503, 503, 202, 202, 202, 202, 202, 202, 202}}
 	q := &fakeQueue{}
-	w := NewWorker(cfg, q, s, allow, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := NewWorker(cfg, Deps{Queue: q, Sender: s, Limiter: allow, Logger: testLogger()})
 
 	for range 200 {
 		w.process(context.Background(), claimed(1, 5))
@@ -477,7 +479,7 @@ func TestBreaker_OpensOnFailureRatio(t *testing.T) {
 	cfg.Breaker = BreakerPolicy{ConsecutiveFailures: 100, FailureRatio: 0.5, MinRequests: 20, Window: time.Minute, OpenTimeout: time.Minute}
 	// Alternating fail/success never builds a streak but is a 50% failure rate.
 	s := &sequenceSender{codes: []int{503, 202}}
-	w := NewWorker(cfg, &fakeQueue{}, s, allow, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w := NewWorker(cfg, Deps{Queue: &fakeQueue{}, Sender: s, Limiter: allow, Logger: testLogger()})
 
 	for range 40 {
 		w.process(context.Background(), claimed(1, 5))

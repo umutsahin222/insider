@@ -9,8 +9,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/umutsahin222/insider/internal/domain"
+	"github.com/umutsahin222/insider/internal/observability"
 )
 
 // NotificationStore is the persistence the API needs; implemented by store/postgres.
@@ -56,6 +59,9 @@ type Deps struct {
 	MetricsHandler http.Handler
 	// Stats, if set, serves GET /v1/stats.
 	Stats StatsStore
+	// Tracing creates a server span per request and its context is stored with every
+	// notification for the worker to continue; nil propagates context without recording.
+	Tracing *observability.Tracing
 }
 
 const (
@@ -64,13 +70,14 @@ const (
 )
 
 type api struct {
-	store   NotificationStore
-	rules   domain.Rules
-	log     *slog.Logger
-	checks  map[string]Check
-	now     func() time.Time
-	metrics Metrics
-	stats   StatsStore
+	store      NotificationStore
+	rules      domain.Rules
+	log        *slog.Logger
+	checks     map[string]Check
+	now        func() time.Time
+	metrics    Metrics
+	stats      StatsStore
+	propagator propagation.TextMapPropagator
 }
 
 // NewRouter builds the HTTP handler with all routes and middleware.
@@ -82,6 +89,11 @@ func NewRouter(d Deps) http.Handler {
 	if a.metrics == nil {
 		a.metrics = nopMetrics{}
 	}
+	tracing := d.Tracing
+	if tracing == nil {
+		tracing = observability.DisabledTracing()
+	}
+	a.propagator = tracing.Propagator
 
 	r := chi.NewRouter()
 	r.Use(correlation, a.observe, a.recoverer)
@@ -111,5 +123,19 @@ func NewRouter(d Deps) http.Handler {
 	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, errMethodNotAllowed)
 	})
-	return r
+
+	// Outermost, so the span is in the context of every log line. The span is renamed to
+	// "METHOD /route/{pattern}" once chi has matched the route (see observe).
+	return otelhttp.NewHandler(r, "http.server",
+		otelhttp.WithTracerProvider(tracing.Provider),
+		otelhttp.WithPropagators(tracing.Propagator),
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return r.Method }),
+		otelhttp.WithFilter(func(r *http.Request) bool {
+			switch r.URL.Path {
+			case "/healthz", "/readyz", "/metrics":
+				return false // probes and scrapes would drown real traces
+			}
+			return true
+		}),
+	)
 }

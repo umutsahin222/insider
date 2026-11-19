@@ -8,6 +8,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/umutsahin222/insider/internal/domain"
 	"github.com/umutsahin222/insider/internal/observability"
@@ -27,6 +29,7 @@ func (a *api) createNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	in := req.input(r.Header.Get("Idempotency-Key"), observability.CorrelationID(ctx))
+	in.TraceContext = observability.InjectTraceContext(ctx, a.propagator)
 
 	n, err := domain.NewNotification(in, a.rules, a.now())
 	if err != nil {
@@ -40,6 +43,7 @@ func (a *api) createNotification(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx = observability.WithNotificationID(ctx, stored.ID.String())
+	trace.SpanFromContext(ctx).SetAttributes(attribute.String("notification.id", stored.ID.String()))
 	if !created {
 		if err := domain.VerifyReplay(stored.RequestHash, n.RequestHash); err != nil {
 			a.log.WarnContext(ctx, "idempotency key reused with a different request", "idempotency_key", in.IdempotencyKey)
@@ -64,9 +68,12 @@ func (a *api) createBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	corrID := observability.CorrelationID(r.Context())
+	// Every item continues this request's trace, so a batch is one trace in Jaeger.
+	traceCtx := observability.InjectTraceContext(r.Context(), a.propagator)
 	inputs := make([]domain.CreateInput, len(req.Items))
 	for i, item := range req.Items {
 		inputs[i] = item.input(item.IdempotencyKey, corrID)
+		inputs[i].TraceContext = traceCtx
 	}
 
 	key := r.Header.Get("Idempotency-Key")
@@ -82,6 +89,8 @@ func (a *api) createBatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := toBatchCreatedResponse(stored)
+	trace.SpanFromContext(r.Context()).SetAttributes(
+		attribute.String("batch.id", stored.ID.String()), attribute.Int("batch.size", resp.Count))
 	if !created {
 		if err := domain.VerifyReplay(stored.RequestHash, batch.RequestHash); err != nil {
 			a.log.WarnContext(r.Context(), "idempotency key reused with a different batch", "idempotency_key", key)

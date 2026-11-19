@@ -12,7 +12,10 @@ import (
 	"strconv"
 	"time"
 
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+
 	"github.com/umutsahin222/insider/internal/domain"
+	"github.com/umutsahin222/insider/internal/observability"
 )
 
 // Client sends notifications to the provider endpoint.
@@ -22,11 +25,18 @@ type Client struct {
 }
 
 // New returns a client posting to url. Per-request deadlines come from the context;
-// timeout is an upper bound for any single request.
-func New(url string, timeout time.Duration) *Client {
+// timeout is an upper bound for any single request. Each call becomes an HTTP client span
+// (a child of the worker's deliver span) and carries a traceparent header; nil tracing
+// still propagates the incoming context.
+func New(url string, timeout time.Duration, tracing *observability.Tracing) *Client {
+	if tracing == nil {
+		tracing = observability.DisabledTracing()
+	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 64 // one connection per concurrent channel worker
-	return &Client{url: url, http: &http.Client{Timeout: timeout, Transport: transport}}
+	traced := otelhttp.NewTransport(transport,
+		otelhttp.WithTracerProvider(tracing.Provider), otelhttp.WithPropagators(tracing.Propagator))
+	return &Client{url: url, http: &http.Client{Timeout: timeout, Transport: traced}}
 }
 
 type sendRequest struct {

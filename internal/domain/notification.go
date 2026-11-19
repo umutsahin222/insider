@@ -91,6 +91,8 @@ type CreateInput struct {
 	IdempotencyKey string
 	TemplateID     *uuid.UUID
 	CorrelationID  string
+	// TraceContext is the serialised trace context of the creating request (see Notification).
+	TraceContext map[string]string
 }
 
 // NewNotification validates in and builds a pending notification ready to be enqueued.
@@ -168,6 +170,7 @@ func build(in CreateInput, rules Rules, now time.Time, prefix string, ve *Valida
 		NextAttemptAt: now,
 		MaxAttempts:   rules.MaxAttempts,
 		CorrelationID: in.CorrelationID,
+		TraceContext:  in.TraceContext,
 		CreatedAt:     now,
 		UpdatedAt:     now,
 	}

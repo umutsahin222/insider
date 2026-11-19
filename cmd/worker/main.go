@@ -44,6 +44,14 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	tracing, err := observability.NewTracing(ctx, observability.TracingConfig{
+		ServiceName: cfg.Tracing.ServiceName, OTLPEndpoint: cfg.Tracing.OTLPEndpoint, SampleRatio: cfg.Tracing.SampleRatio,
+	})
+	if err != nil {
+		return err
+	}
+	defer flushTraces(tracing, log)
+
 	pool, err := postgres.Connect(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -61,7 +69,7 @@ func run() error {
 	reg := metrics.NewRegistry()
 	deliveryMetrics := metrics.NewDeliveryMetrics(reg)
 	limiter := ratelimit.New(rdb, cfg.RateLimitPerSecond, cfg.RateLimitBurst)
-	sender := provider.New(cfg.ProviderURL, cfg.ProviderTimeout)
+	sender := provider.New(cfg.ProviderURL, cfg.ProviderTimeout, tracing)
 
 	ops := &http.Server{
 		Addr: cfg.HTTPAddr,
@@ -96,7 +104,10 @@ func run() error {
 				Window:              cfg.BreakerWindow,
 				OpenTimeout:         cfg.BreakerOpenTimeout,
 			},
-		}, store, sender, limiter, deliveryMetrics, log)
+		}, delivery.Deps{
+			Queue: store, Sender: sender, Limiter: limiter,
+			Metrics: deliveryMetrics, Tracing: tracing, Logger: log,
+		})
 		wg.Go(func() { w.Run(ctx) })
 	}
 	wg.Go(func() {
@@ -104,7 +115,8 @@ func run() error {
 	})
 
 	log.Info("worker running", "channels", cfg.Channels, "provider_url", cfg.ProviderURL,
-		"rate_limit_per_second", cfg.RateLimitPerSecond, "ops_addr", cfg.HTTPAddr)
+		"rate_limit_per_second", cfg.RateLimitPerSecond, "ops_addr", cfg.HTTPAddr,
+		"tracing", cfg.Tracing.OTLPEndpoint != "")
 	select {
 	case <-ctx.Done():
 	case err := <-opsErr:
@@ -159,4 +171,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// flushTraces exports buffered spans before exit.
+func flushTraces(t *observability.Tracing, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := t.Shutdown(ctx); err != nil {
+		log.Warn("flushing traces failed", "error", err)
+	}
 }

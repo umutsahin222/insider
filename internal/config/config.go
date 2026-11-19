@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +80,9 @@ func loadAPI(lookup func(string) (string, bool)) (API, error) {
 	if cfg.Rules.MaxBatchSize < 1 || cfg.Rules.MaxAttempts < 1 {
 		e.errs = append(e.errs, errors.New("MAX_BATCH_SIZE and MAX_ATTEMPTS must be positive"))
 	}
+	e.positive(map[string]time.Duration{
+		"SHUTDOWN_TIMEOUT": cfg.ShutdownTimeout, "MAX_SCHEDULE_AHEAD": cfg.Rules.MaxScheduleAhead,
+	})
 	if err := errors.Join(e.errs...); err != nil {
 		return API{}, fmt.Errorf("loading config: %w", err)
 	}
@@ -172,8 +176,16 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 	if cfg.BreakerFailureRatio <= 0 || cfg.BreakerFailureRatio > 1 {
 		e.errs = append(e.errs, errors.New("BREAKER_FAILURE_RATIO must be in (0, 1]"))
 	}
-	if cfg.BreakerWindow <= 0 || cfg.BreakerOpenTimeout <= 0 {
-		e.errs = append(e.errs, errors.New("BREAKER_WINDOW and BREAKER_OPEN_TIMEOUT must be positive"))
+	// Zero would panic a ticker (REAPER_INTERVAL), busy-loop retries (RETRY_BASE) or time out
+	// every send at once (PROVIDER_TIMEOUT).
+	e.positive(map[string]time.Duration{
+		"SHUTDOWN_TIMEOUT": cfg.ShutdownTimeout, "PROVIDER_TIMEOUT": cfg.ProviderTimeout,
+		"LEASE_DURATION": cfg.Lease, "POLL_INTERVAL": cfg.PollInterval, "REAPER_INTERVAL": cfg.ReaperInterval,
+		"RETRY_BASE": cfg.RetryBase, "RETRY_MAX": cfg.RetryMax,
+		"BREAKER_WINDOW": cfg.BreakerWindow, "BREAKER_OPEN_TIMEOUT": cfg.BreakerOpenTimeout,
+	})
+	if cfg.RetryMax < cfg.RetryBase {
+		e.errs = append(e.errs, errors.New("RETRY_MAX must be at least RETRY_BASE"))
 	}
 	// A lease shorter than the worst-case send would let the reaper hand live work to
 	// another worker and cause duplicate sends.
@@ -238,6 +250,20 @@ func (e *env) float(key string, def float64) float64 {
 		return def
 	}
 	return f
+}
+
+// positive reports every duration that is zero or negative.
+func (e *env) positive(durations map[string]time.Duration) {
+	names := make([]string, 0, len(durations))
+	for name, d := range durations {
+		if d <= 0 {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names) // stable error messages
+	for _, name := range names {
+		e.errs = append(e.errs, fmt.Errorf("%s must be positive", name))
+	}
 }
 
 func (e *env) duration(key string, def time.Duration) time.Duration {

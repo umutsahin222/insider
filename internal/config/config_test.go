@@ -72,6 +72,12 @@ func TestLoadWorker(t *testing.T) {
 		"breaker ratio above 1":               {"BREAKER_FAILURE_RATIO": "1.5"},
 		"breaker ratio not a number":          {"BREAKER_FAILURE_RATIO": "half"},
 		"zero breaker window":                 {"BREAKER_WINDOW": "0s"},
+		"zero reaper interval":                {"REAPER_INTERVAL": "0s"},
+		"zero poll interval":                  {"POLL_INTERVAL": "0s"},
+		"zero retry base":                     {"RETRY_BASE": "0s"},
+		"retry max below base":                {"RETRY_BASE": "10s", "RETRY_MAX": "5s"},
+		"negative provider timeout":           {"PROVIDER_TIMEOUT": "-1s"},
+		"zero shutdown timeout":               {"SHUTDOWN_TIMEOUT": "0s"},
 		"sample ratio above 1":                {"TRACE_SAMPLE_RATIO": "2"},
 	}
 	for name, env := range tests {

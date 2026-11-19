@@ -24,6 +24,7 @@ type NotificationStore interface {
 	ListAttempts(ctx context.Context, id uuid.UUID) ([]domain.DeliveryAttempt, error)
 	ListNotifications(ctx context.Context, f domain.ListFilter) (domain.Page, error)
 	CancelNotification(ctx context.Context, id uuid.UUID) (domain.Notification, error)
+	RetryNotification(ctx context.Context, id uuid.UUID, extraAttempts int) (domain.Notification, error)
 	BatchSummary(ctx context.Context, batchID uuid.UUID) (domain.BatchSummary, error)
 	CancelBatch(ctx context.Context, batchID uuid.UUID) (int, error)
 }
@@ -110,6 +111,7 @@ func NewRouter(d Deps) http.Handler {
 		r.Get("/notifications", a.listNotifications)
 		r.Get("/notifications/{id}", a.getNotification)
 		r.Post("/notifications/{id}/cancel", a.cancelNotification)
+		r.Post("/notifications/{id}/retry", a.retryNotification)
 		r.Get("/batches/{id}", a.getBatch)
 		r.Post("/batches/{id}/cancel", a.cancelBatch)
 		if a.stats != nil {

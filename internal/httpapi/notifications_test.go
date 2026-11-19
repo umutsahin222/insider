@@ -112,6 +112,21 @@ func (s *fakeStore) CancelNotification(_ context.Context, id uuid.UUID) (domain.
 	return n, nil
 }
 
+func (s *fakeStore) RetryNotification(_ context.Context, id uuid.UUID, extra int) (domain.Notification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := s.byID[id]
+	if !ok {
+		return n, domain.NotFound("notification not found")
+	}
+	if n.Status != domain.StatusFailed {
+		return domain.Notification{}, domain.Conflict("notification is " + string(n.Status))
+	}
+	n.Status, n.MaxAttempts = domain.StatusPending, n.Attempts+extra
+	s.byID[id] = n
+	return n, nil
+}
+
 func (s *fakeStore) BatchSummary(_ context.Context, id uuid.UUID) (domain.BatchSummary, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -394,6 +409,34 @@ func TestCreateBatch(t *testing.T) {
 			t.Errorf("status = %d", rec.Code)
 		}
 	})
+}
+
+func TestRetry(t *testing.T) {
+	store := newFakeStore()
+	h := newTestServer(t, store, nil)
+	created := decode[notificationResponse](t, do(t, h, http.MethodPost, "/v1/notifications", validBody))
+	path := "/v1/notifications/" + created.ID.String() + "/retry"
+
+	if rec := do(t, h, http.MethodPost, path, ""); rec.Code != http.StatusConflict {
+		t.Errorf("retry of a pending notification: status = %d, want 409", rec.Code)
+	}
+
+	// Simulate the worker dead-lettering it after 5 attempts.
+	n := store.byID[created.ID]
+	n.Status, n.Attempts = domain.StatusFailed, 5
+	store.byID[created.ID] = n
+
+	rec := do(t, h, http.MethodPost, path, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
+	}
+	got := decode[notificationResponse](t, rec)
+	if got.Status != "pending" || got.Attempts != 5 || got.MaxAttempts != 10 {
+		t.Errorf("retried = status %s attempts %d/%d, want pending 5/10", got.Status, got.Attempts, got.MaxAttempts)
+	}
+	if rec := do(t, h, http.MethodPost, "/v1/notifications/"+uuid.NewString()+"/retry", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("unknown id: status = %d, want 404", rec.Code)
+	}
 }
 
 func TestGetAndCancel(t *testing.T) {

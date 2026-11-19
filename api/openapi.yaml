@@ -212,8 +212,10 @@ paths:
       operationId: retryNotification
       summary: Re-queue a failed notification
       description: |
-        Moves a `failed` notification (the dead-letter set) back to `pending` with a fresh
-        attempt budget.
+        Moves a `failed` notification (the dead-letter set) back to `pending`, due now, with a
+        fresh attempt budget: `max_attempts` becomes `attempts + MAX_ATTEMPTS`. Attempt numbers
+        keep counting up (6, 7, …) so the delivery history in `delivery_attempts` is preserved.
+        Any other status is a `409`.
       responses:
         '200':
           description: Re-queued.

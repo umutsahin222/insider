@@ -242,6 +242,24 @@ func (a *api) cancelNotification(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toNotificationResponse(n))
 }
 
+// retryNotification re-queues a dead-lettered notification with a fresh attempt budget
+// (MAX_ATTEMPTS more attempts); its delivery history is kept.
+func (a *api) retryNotification(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathUUID(r)
+	if !ok {
+		a.writeError(w, r, domain.NotFound("notification not found"))
+		return
+	}
+	n, err := a.store.RetryNotification(r.Context(), id, a.rules.MaxAttempts)
+	if err != nil {
+		a.writeError(w, r, err)
+		return
+	}
+	a.log.InfoContext(observability.WithNotificationID(r.Context(), id.String()), "notification re-queued",
+		"attempts", n.Attempts, "max_attempts", n.MaxAttempts)
+	writeJSON(w, http.StatusOK, toNotificationResponse(n))
+}
+
 func (a *api) getBatch(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathUUID(r)
 	if !ok {

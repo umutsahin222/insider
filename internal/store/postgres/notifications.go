@@ -340,6 +340,30 @@ func (s *Store) CancelNotification(ctx context.Context, id uuid.UUID) (domain.No
 		"notification is " + string(current.Status) + "; only pending notifications can be cancelled")
 }
 
+// RetryNotification moves a failed notification back to the queue, due now, with
+// extraAttempts more attempts. attempts is deliberately not reset: it is the lease fencing
+// token (ADR-005) and part of the delivery_attempts key, so restarting it at 0 would let a
+// stale worker's write match a new attempt and would collide with the existing audit rows.
+func (s *Store) RetryNotification(ctx context.Context, id uuid.UUID, extraAttempts int) (domain.Notification, error) {
+	n, err := scanNotification(s.pool.QueryRow(ctx, `
+		UPDATE notifications SET status = 'pending', max_attempts = attempts + $2,
+			next_attempt_at = now(), locked_until = NULL
+		WHERE id = $1 AND status = 'failed'
+		RETURNING `+notificationColumns, id, extraAttempts))
+	if err == nil {
+		return n, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return domain.Notification{}, fmt.Errorf("retrying notification: %w", err)
+	}
+	current, err := s.GetNotification(ctx, id)
+	if err != nil {
+		return domain.Notification{}, err
+	}
+	return domain.Notification{}, domain.Conflict(
+		"notification is " + string(current.Status) + "; only failed notifications can be retried")
+}
+
 // BatchSummary counts a batch's notifications by status.
 func (s *Store) BatchSummary(ctx context.Context, batchID uuid.UUID) (domain.BatchSummary, error) {
 	rows, err := s.pool.Query(ctx,

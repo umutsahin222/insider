@@ -42,6 +42,60 @@ func insertSMS(t *testing.T, count int, mutate func(i int, in *domain.CreateInpu
 	return batch.Notifications
 }
 
+func TestRetryNotification(t *testing.T) {
+	resetQueue(t)
+	ctx := context.Background()
+	n := insertSMS(t, 1, func(_ int, in *domain.CreateInput) {})[0]
+
+	if _, err := testStore.RetryNotification(ctx, n.ID, 5); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("retry of pending: err = %v, want ErrConflict", err)
+	}
+
+	// Exhaust the attempts: 5 claims, each failing.
+	for i := 1; i <= 5; i++ {
+		c := claimOne(t, time.Minute)
+		msg := "boom"
+		a := domain.DeliveryAttempt{NotificationID: c.ID, Attempt: c.Attempts, Outcome: domain.OutcomeRetryableError, Error: &msg}
+		var err error
+		if i < 5 {
+			err = testStore.ScheduleRetry(ctx, c, 0, a)
+		} else {
+			err = testStore.MarkFailed(ctx, c, a)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	retried, err := testStore.RetryNotification(ctx, n.ID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != domain.StatusPending || retried.Attempts != 5 || retried.MaxAttempts != 10 {
+		t.Fatalf("retried = %s %d/%d, want pending 5/10", retried.Status, retried.Attempts, retried.MaxAttempts)
+	}
+
+	// The next attempt is number 6: the fencing token keeps rising and the audit trail grows.
+	c := claimOne(t, time.Minute)
+	if c.ID != n.ID || c.Attempts != 6 {
+		t.Fatalf("claimed %s attempt %d, want %s attempt 6", c.ID, c.Attempts, n.ID)
+	}
+	if err := testStore.MarkSent(ctx, c, nil, domain.DeliveryAttempt{NotificationID: c.ID, Attempt: 6, Outcome: domain.OutcomeSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	attempts, err := testStore.ListAttempts(ctx, n.ID)
+	if err != nil || len(attempts) != 6 || attempts[5].Outcome != domain.OutcomeSuccess {
+		t.Errorf("attempts = %d (err %v), want 6 with the last one successful", len(attempts), err)
+	}
+
+	if _, err := testStore.RetryNotification(ctx, n.ID, 5); !errors.Is(err, domain.ErrConflict) {
+		t.Errorf("retry of sent: err = %v, want ErrConflict", err)
+	}
+	if _, err := testStore.RetryNotification(ctx, uuid.New(), 5); !errors.Is(err, domain.ErrNotFound) {
+		t.Errorf("retry of unknown id: err = %v, want ErrNotFound", err)
+	}
+}
+
 func claimOne(t *testing.T, lease time.Duration) domain.Notification {
 	t.Helper()
 	got, err := testStore.Claim(context.Background(), domain.ChannelSMS, 1, lease)

@@ -1,0 +1,34 @@
+# Example alerts built on the metrics in ADR-007. Queue gauges are exported by every API
+# replica with identical values, hence max by (...).
+groups:
+  - name: notifications
+    rules:
+      - alert: NotificationQueueLagging
+        expr: max by (channel) (notification_queue_oldest_ready_age_seconds) > 60
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.channel }}: due notifications have waited over a minute"
+
+      - alert: NotificationDeliveryFailureRateHigh
+        expr: |
+          sum by (channel) (rate(notification_deliveries_total{outcome!="success"}[5m]))
+            / sum by (channel) (rate(notification_deliveries_total[5m])) > 0.5
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.channel }}: more than half of provider calls are failing"
+
+      - alert: NotificationCircuitOpen
+        expr: max by (channel) (notification_circuit_breaker_state) == 2
+        for: 1m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.channel }}: circuit breaker open, deliveries paused"
+
+      - alert: NotificationQueueStatsDown
+        expr: max(notification_queue_stats_up) == 0
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Queue depth cannot be read from the database"

@@ -1,0 +1,142 @@
+# One-command setup: docker compose up --build
+#
+#   API            http://localhost:8080      (OpenAPI: api/openapi.yaml)
+#   Jaeger UI      http://localhost:16686
+#   Prometheus     http://localhost:9090
+#   Mock provider  http://localhost:8090/stats
+#
+# Host ports are overridable (API_PORT, JAEGER_UI_PORT, PROMETHEUS_PORT, MOCKPROVIDER_PORT).
+# Postgres and Redis are not published, so they never clash with local instances.
+# Scale delivery with: docker compose up --build --scale worker=3
+# Deliver to webhook.site instead of the mock: PROVIDER_URL=https://webhook.site/<uuid> docker compose up
+
+name: insider-notify
+
+x-app: &app
+  image: insider-notify:local
+  build: .
+  restart: unless-stopped
+
+x-db-env: &db-env
+  DATABASE_URL: postgres://notify:notify@postgres:5432/notify?sslmode=disable
+  REDIS_URL: redis://redis:6379/0
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: notify
+      POSTGRES_PASSWORD: notify
+      POSTGRES_DB: notify
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notify -d notify"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # Applies versioned migrations (migrations/) once, then exits; api and worker wait for it.
+  migrate:
+    image: migrate/migrate:v4.18.1
+    volumes:
+      - ./migrations:/migrations:ro
+    command: ["-path=/migrations", "-database", "postgres://notify:notify@postgres:5432/notify?sslmode=disable", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Stand-in for webhook.site. FAILURE_RATE (default 10%) makes retries visible out of the box.
+  mockprovider:
+    <<: *app
+    entrypoint: ["/mockprovider"]
+    environment:
+      HTTP_ADDR: ":8090"
+      FAILURE_RATE: ${FAILURE_RATE:-0.1}
+      LATENCY: ${PROVIDER_LATENCY:-20ms}
+    ports:
+      - "${MOCKPROVIDER_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD", "/healthcheck", "http://localhost:8090/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    <<: *app
+    entrypoint: ["/api"]
+    environment:
+      <<: *db-env
+      HTTP_ADDR: ":8080"
+      OTEL_SERVICE_NAME: notification-api
+    ports:
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/healthcheck", "http://localhost:8080/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # No host port: workers are scaled with --scale and scraped by Prometheus via DNS.
+  worker:
+    <<: *app
+    entrypoint: ["/worker"]
+    environment:
+      <<: *db-env
+      HTTP_ADDR: ":9091"
+      OTEL_SERVICE_NAME: notification-worker
+      PROVIDER_URL: ${PROVIDER_URL:-http://mockprovider:8090/send}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      mockprovider:
+        condition: service_healthy
+      jaeger:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "/healthcheck", "http://localhost:9091/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  jaeger:
+    image: jaegertracing/jaeger:2.23.0
+    ports:
+      - "${JAEGER_UI_PORT:-16686}:16686"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    volumes:
+      - ./deploy/prometheus:/etc/prometheus:ro
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    depends_on:
+      - api
+      - worker
+    restart: unless-stopped
+
+volumes:
+  pgdata:

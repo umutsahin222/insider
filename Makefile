@@ -1,13 +1,26 @@
-.PHONY: run down build test test-unit lint lint-api migrate-up migrate-down tidy
+.PHONY: run up down logs smoke build test test-unit lint lint-api migrate-up migrate-down tidy
 
-DB_URL ?= postgres://notify:notify@localhost:5432/notify?sslmode=disable
+# Inside the compose network (the migrate service talks to the postgres service).
+COMPOSE_DB_URL ?= postgres://notify:notify@postgres:5432/notify?sslmode=disable
 REDOCLY_VERSION ?= 1.25.11
 
+# Foreground, with logs.
 run:
 	docker compose up --build
 
+# Background; returns once every service is healthy.
+up:
+	docker compose up --build -d --wait
+
 down:
 	docker compose down -v
+
+logs:
+	docker compose logs -f api worker
+
+# End-to-end checks against a running stack (make up first).
+smoke:
+	bash scripts/smoke.sh
 
 build:
 	go build -o bin/ ./cmd/...
@@ -35,10 +48,10 @@ lint-api:
 	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR):/spec" -w /spec redocly/cli:$(REDOCLY_VERSION) lint api/openapi.yaml
 
 migrate-up:
-	docker compose run --rm migrate -path=/migrations -database "$(DB_URL)" up
+	docker compose run --rm migrate -path=/migrations -database "$(COMPOSE_DB_URL)" up
 
 migrate-down:
-	docker compose run --rm migrate -path=/migrations -database "$(DB_URL)" down 1
+	docker compose run --rm migrate -path=/migrations -database "$(COMPOSE_DB_URL)" down 1
 
 tidy:
 	go mod tidy

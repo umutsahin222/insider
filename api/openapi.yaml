@@ -259,6 +259,28 @@ paths:
                   cancelled: { type: integer, minimum: 0 }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  /v1/stats:
+    get:
+      tags: [ops]
+      operationId: getStats
+      summary: Delivery statistics
+      description: |
+        Current backlog per channel plus delivery success rate and latency percentiles over
+        a recent window. Computed from the database, so it aggregates every worker replica
+        and needs no Prometheus server. Every channel is always listed (zero-filled).
+      parameters:
+        - name: window
+          in: query
+          description: Go duration between 10s and 24h.
+          schema: { type: string, default: 5m, examples: [5m, 1h] }
+      responses:
+        '200':
+          description: Statistics.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Stats' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
   /v1/templates:
     post:
       tags: [templates]
@@ -516,6 +538,81 @@ components:
           type: array
           description: In the same order as the request items.
           items: { type: string, format: uuid }
+
+    QueueCounts:
+      type: object
+      required: [ready, delayed, processing]
+      properties:
+        ready: { type: integer, description: Pending and due now. }
+        delayed: { type: integer, description: Pending but scheduled later or backing off a retry. }
+        processing: { type: integer, description: Claimed by a worker. }
+
+    Latency:
+      type: object
+      description: Percentiles in milliseconds; 0 when there is no data.
+      required: [p50, p95, p99]
+      properties:
+        p50: { type: number }
+        p95: { type: number }
+        p99: { type: number }
+
+    Stats:
+      type: object
+      required: [window_seconds, generated_at, queue, delivery]
+      properties:
+        window_seconds: { type: integer }
+        generated_at: { type: string, format: date-time }
+        queue:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/QueueCounts'
+              - type: object
+                required: [channel, oldest_ready_age_seconds, by_priority]
+                properties:
+                  channel: { $ref: '#/components/schemas/Channel' }
+                  oldest_ready_age_seconds:
+                    type: number
+                    description: How long the oldest due notification has waited (queue lag).
+                  by_priority:
+                    type: object
+                    properties:
+                      high: { $ref: '#/components/schemas/QueueCounts' }
+                      normal: { $ref: '#/components/schemas/QueueCounts' }
+                      low: { $ref: '#/components/schemas/QueueCounts' }
+        delivery:
+          type: array
+          items:
+            type: object
+            required: [channel, attempts, succeeded, retryable_errors, permanent_errors, success_rate,
+              sent, failed, provider_latency_ms, end_to_end_latency_ms]
+            properties:
+              channel: { $ref: '#/components/schemas/Channel' }
+              attempts: { type: integer, description: Provider calls in the window. }
+              succeeded: { type: integer }
+              retryable_errors: { type: integer }
+              permanent_errors: { type: integer }
+              success_rate:
+                type: [number, 'null']
+                description: succeeded / attempts; null when there were no attempts.
+              sent: { type: integer, description: Notifications sent in the window. }
+              failed: { type: integer, description: Notifications that failed permanently in the window. }
+              provider_latency_ms: { $ref: '#/components/schemas/Latency' }
+              end_to_end_latency_ms:
+                allOf:
+                  - $ref: '#/components/schemas/Latency'
+                description: From becoming due (created or scheduled) to sent, including retries.
+          example:
+            - channel: email
+              attempts: 408
+              succeeded: 280
+              retryable_errors: 128
+              permanent_errors: 0
+              success_rate: 0.686
+              sent: 280
+              failed: 0
+              provider_latency_ms: { p50: 30, p95: 39, p99: 40 }
+              end_to_end_latency_ms: { p50: 2360.729, p95: 4414.305, p99: 5431.368 }
 
     BatchSummary:
       type: object

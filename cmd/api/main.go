@@ -73,6 +73,7 @@ func run() error {
 		},
 		Metrics:        metrics.NewHTTPMetrics(reg),
 		MetricsHandler: metrics.MetricsHandler(reg),
+		Stats:          store,
 	})
 
 	srv := &http.Server{

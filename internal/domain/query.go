@@ -73,3 +73,11 @@ type DeliveryStats struct {
 	// scheduled time) until it was sent, including queueing and retries.
 	EndToEndLatency Percentiles
 }
+
+// SuccessRate is the share of provider calls that succeeded; ok is false without calls.
+func (s DeliveryStats) SuccessRate() (rate float64, ok bool) {
+	if s.Attempts == 0 {
+		return 0, false
+	}
+	return float64(s.Succeeded) / float64(s.Attempts), true
+}

@@ -54,6 +54,8 @@ type Deps struct {
 	Metrics Metrics
 	// MetricsHandler, if set, is served at GET /metrics.
 	MetricsHandler http.Handler
+	// Stats, if set, serves GET /v1/stats.
+	Stats StatsStore
 }
 
 const (
@@ -68,11 +70,12 @@ type api struct {
 	checks  map[string]Check
 	now     func() time.Time
 	metrics Metrics
+	stats   StatsStore
 }
 
 // NewRouter builds the HTTP handler with all routes and middleware.
 func NewRouter(d Deps) http.Handler {
-	a := &api{store: d.Store, rules: d.Rules, log: d.Logger, checks: d.Checks, now: d.Now, metrics: d.Metrics}
+	a := &api{store: d.Store, rules: d.Rules, log: d.Logger, checks: d.Checks, now: d.Now, metrics: d.Metrics, stats: d.Stats}
 	if a.now == nil {
 		a.now = time.Now
 	}
@@ -97,6 +100,9 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/notifications/{id}/cancel", a.cancelNotification)
 		r.Get("/batches/{id}", a.getBatch)
 		r.Post("/batches/{id}/cancel", a.cancelBatch)
+		if a.stats != nil {
+			r.Get("/stats", a.getStats)
+		}
 	})
 
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {

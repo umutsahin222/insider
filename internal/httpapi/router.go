@@ -27,6 +27,9 @@ type NotificationStore interface {
 	RetryNotification(ctx context.Context, id uuid.UUID, extraAttempts int) (domain.Notification, error)
 	BatchSummary(ctx context.Context, batchID uuid.UUID) (domain.BatchSummary, error)
 	CancelBatch(ctx context.Context, batchID uuid.UUID) (int, error)
+	CreateTemplate(ctx context.Context, t domain.Template) (domain.Template, error)
+	TemplatesByName(ctx context.Context, names []string) (map[string]domain.Template, error)
+	ListTemplates(ctx context.Context) ([]domain.Template, error)
 }
 
 // Check reports whether a dependency is healthy; used by /readyz.
@@ -114,6 +117,8 @@ func NewRouter(d Deps) http.Handler {
 		r.Post("/notifications/{id}/retry", a.retryNotification)
 		r.Get("/batches/{id}", a.getBatch)
 		r.Post("/batches/{id}/cancel", a.cancelBatch)
+		r.With(maxBody(maxSingleBody)).Post("/templates", a.createTemplate)
+		r.Get("/templates", a.listTemplates)
 		if a.stats != nil {
 			r.Get("/stats", a.getStats)
 		}

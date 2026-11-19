@@ -22,16 +22,19 @@ import (
 
 // fakeStore is an in-memory NotificationStore that mimics the store's contract.
 type fakeStore struct {
-	mu      sync.Mutex
-	byID    map[uuid.UUID]domain.Notification
-	byKey   map[string]uuid.UUID
-	batches map[string]domain.Batch // by batch idempotency key
-	lastLF  domain.ListFilter
-	listErr error
+	mu        sync.Mutex
+	byID      map[uuid.UUID]domain.Notification
+	byKey     map[string]uuid.UUID
+	batches   map[string]domain.Batch // by batch idempotency key
+	templates map[string]domain.Template
+	lastLF    domain.ListFilter
+
+	templateLookups int
+	listErr         error
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{byID: map[uuid.UUID]domain.Notification{}, byKey: map[string]uuid.UUID{}, batches: map[string]domain.Batch{}}
+	return &fakeStore{byID: map[uuid.UUID]domain.Notification{}, byKey: map[string]uuid.UUID{}, batches: map[string]domain.Batch{}, templates: map[string]domain.Template{}}
 }
 
 func (s *fakeStore) CreateNotification(_ context.Context, n domain.Notification) (domain.Notification, bool, error) {
@@ -125,6 +128,39 @@ func (s *fakeStore) RetryNotification(_ context.Context, id uuid.UUID, extra int
 	n.Status, n.MaxAttempts = domain.StatusPending, n.Attempts+extra
 	s.byID[id] = n
 	return n, nil
+}
+
+func (s *fakeStore) CreateTemplate(_ context.Context, t domain.Template) (domain.Template, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.templates[t.Name]; ok {
+		return domain.Template{}, domain.Conflict("template exists")
+	}
+	s.templates[t.Name] = t
+	return t, nil
+}
+
+func (s *fakeStore) TemplatesByName(_ context.Context, names []string) (map[string]domain.Template, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.templateLookups++
+	out := map[string]domain.Template{}
+	for _, n := range names {
+		if t, ok := s.templates[n]; ok {
+			out[n] = t
+		}
+	}
+	return out, nil
+}
+
+func (s *fakeStore) ListTemplates(context.Context) ([]domain.Template, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]domain.Template, 0, len(s.templates))
+	for _, t := range s.templates {
+		out = append(out, t)
+	}
+	return out, nil
 }
 
 func (s *fakeStore) BatchSummary(_ context.Context, id uuid.UUID) (domain.BatchSummary, error) {

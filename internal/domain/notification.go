@@ -81,11 +81,13 @@ type Template struct {
 }
 
 // CreateInput is the raw, unvalidated request to create a notification.
-// Content must already be rendered if a template was used.
+// Exactly one of Content and Template must be set; a template is rendered here and the
+// result is validated like literal content.
 type CreateInput struct {
 	Channel        string
 	Recipient      string
 	Content        string
+	Template       *TemplateRef
 	Priority       string
 	ScheduledAt    *time.Time
 	IdempotencyKey string
@@ -181,7 +183,12 @@ func build(in CreateInput, rules Rules, now time.Time, prefix string, ve *Valida
 	} else {
 		n.Channel = ch
 		rules.validateRecipient(ch, in.Recipient, prefix, ve)
-		rules.validateContent(ch, in.Content, prefix, ve)
+		switch {
+		case in.Template == nil:
+			rules.validateContent(ch, in.Content, prefix, ve)
+		case applyTemplate(in, ch, &n, prefix, ve):
+			rules.validateContent(ch, n.Content, prefix, ve)
+		}
 	}
 
 	if p, err := ParsePriority(in.Priority); err != nil {

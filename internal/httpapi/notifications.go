@@ -30,8 +30,13 @@ func (a *api) createNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	in := req.input(r.Header.Get("Idempotency-Key"), observability.CorrelationID(ctx))
 	in.TraceContext = observability.InjectTraceContext(ctx, a.propagator)
+	inputs := []domain.CreateInput{in}
+	if err := a.resolveTemplates(ctx, inputs); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 
-	n, err := domain.NewNotification(in, a.rules, a.now())
+	n, err := domain.NewNotification(inputs[0], a.rules, a.now())
 	if err != nil {
 		a.writeError(w, r, err)
 		return
@@ -76,6 +81,10 @@ func (a *api) createBatch(w http.ResponseWriter, r *http.Request) {
 		inputs[i].TraceContext = traceCtx
 	}
 
+	if err := a.resolveTemplates(r.Context(), inputs); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	key := r.Header.Get("Idempotency-Key")
 	batch, err := domain.NewBatch(inputs, key, a.rules, a.now())
 	if err != nil {

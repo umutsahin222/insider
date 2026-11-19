@@ -15,15 +15,16 @@ import (
 // public contract can evolve independently of the internal model.
 
 type createNotificationRequest struct {
-	Channel     string     `json:"channel"`
-	Recipient   string     `json:"recipient"`
-	Content     string     `json:"content"`
-	Priority    string     `json:"priority"`
-	ScheduledAt *time.Time `json:"scheduled_at"`
+	Channel     string              `json:"channel"`
+	Recipient   string              `json:"recipient"`
+	Content     string              `json:"content"`
+	Priority    string              `json:"priority"`
+	ScheduledAt *time.Time          `json:"scheduled_at"`
+	Template    *templateRefRequest `json:"template"`
 }
 
 func (r createNotificationRequest) input(idempotencyKey, correlationID string) domain.CreateInput {
-	return domain.CreateInput{
+	in := domain.CreateInput{
 		Channel:        r.Channel,
 		Recipient:      r.Recipient,
 		Content:        r.Content,
@@ -32,6 +33,10 @@ func (r createNotificationRequest) input(idempotencyKey, correlationID string) d
 		IdempotencyKey: idempotencyKey,
 		CorrelationID:  correlationID,
 	}
+	if r.Template != nil {
+		in.Template = &domain.TemplateRef{Name: r.Template.Name, Variables: r.Template.Variables}
+	}
+	return in
 }
 
 type createBatchItem struct {

@@ -35,7 +35,11 @@ end-to-end p50 latency rose to 65 s. A ratio over a minimum sample separates "de
 are configurable (`BREAKER_*`).
 
 **Exhausted attempts** → `failed` with `last_error`. Failed notifications are the dead-letter set:
-queryable via the list API and re-queueable with `POST /v1/notifications/{id}/retry`.
+queryable via the list API and re-queueable with `POST /v1/notifications/{id}/retry`. A manual
+retry raises `max_attempts` to `attempts + MAX_ATTEMPTS` instead of resetting `attempts` to 0:
+`attempts` is the lease fencing token (ADR-005) and part of the `delivery_attempts` key, so a
+reset would let a stale worker's write match a new attempt and collide with the audit rows.
+Attempt numbers simply continue (6, 7, …).
 
 Every attempt is recorded in `delivery_attempts` (status code, error, duration) for auditability.
 

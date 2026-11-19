@@ -5,8 +5,8 @@ Guidance for Claude Code when working in this repository.
 ## Project
 Event-driven notification system (SMS / Email / Push) for the Insider One assessment.
 Two binaries share one codebase:
-- `cmd/api` – HTTP API (chi), WebSocket fan-out, Prometheus `/metrics`
-- `cmd/worker` – per-channel delivery workers (claim → rate-limit → send → retry)
+- `cmd/api` – HTTP API (chi), WebSocket fan-out, `/metrics` (incl. queue depth), `/v1/stats`
+- `cmd/worker` – per-channel delivery workers (claim → rate-limit → send → retry); `/metrics`, `/healthz`, `/readyz` on `:9091`
 - `cmd/mockprovider` – local stand-in for webhook.site with configurable failure rate/latency
 
 PostgreSQL is both the source of truth **and** the queue (`FOR UPDATE SKIP LOCKED`).
@@ -17,7 +17,8 @@ Redis is used for the distributed rate limiter and status-event pub/sub. See `do
 - Business rules (validation, status transitions, retry policy) live in `internal/domain` or `internal/delivery`, never in handlers or SQL.
 - Every status transition is a **conditional UPDATE** (`WHERE status = <expected>`). Never read-then-write.
 - Interfaces are defined by the consumer package, kept small, and implemented in `store/*`, `ratelimit`, `provider`.
-- No global state. Wire dependencies explicitly in `cmd/*/main.go`.
+- No global state. Wire dependencies explicitly in `cmd/*/main.go` — this includes Prometheus registries and the OTel tracer provider (never the library globals).
+- Metric labels come from closed sets (channel, priority, outcome, route *pattern*); never put IDs or raw paths in labels.
 - Config only via environment variables (`internal/config`), with sane defaults for local dev.
 
 ## Go conventions

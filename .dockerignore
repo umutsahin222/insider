@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+bin
+docs
+*.pdf
+*.exe
+*.test
+*.out
+coverage.*
+.env
+.idea
+.vscode

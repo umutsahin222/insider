@@ -1,12 +1,16 @@
 package events
 
 import (
+	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/umutsahin222/insider/internal/domain"
 )
@@ -115,4 +119,49 @@ func TestHub_DropAllClosesEverySubscription(t *testing.T) {
 	if h.Subscribers() != 0 {
 		t.Errorf("subscribers = %d", h.Subscribers())
 	}
+}
+
+// A Redis that accepts connections and never answers: every send hangs until its timeout.
+func stalledRedis(t *testing.T) *redis.Client {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}()
+	rdb := redis.NewClient(&redis.Options{Addr: ln.Addr().String(), MaxRetries: -1})
+	t.Cleanup(func() { _ = rdb.Close() })
+	return rdb
+}
+
+func TestPublisher_NeverBlocksTheCaller(t *testing.T) {
+	pub := NewPublisher(stalledRedis(t), discard)
+
+	start := time.Now()
+	for range 2 * publishQueueSize { // more than the queue holds: the excess is dropped
+		pub.Publish(context.Background(), event(uuid.New(), domain.StatusSent))
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("publishing took %s with a stalled Redis; Publish must only enqueue", d)
+	}
+	if pub.dropped.Load() == 0 {
+		t.Error("events beyond the queue size must be dropped, not block")
+	}
+
+	// Close cannot flush into a stalled Redis; it gives up when its context ends.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if err := pub.Close(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Close = %v, want deadline exceeded", err)
+	}
+	pub.Publish(context.Background(), event(uuid.New(), domain.StatusSent)) // after Close: discarded, no panic
 }

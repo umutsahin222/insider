@@ -15,8 +15,12 @@ correct when that transport hiccups.
 - **Producers:** workers publish `processing`, `sent`, `pending` (retry scheduled, or work
   released with the attempt handed back) and `failed`; the reaper publishes what it reclaimed;
   the API publishes cancellations and manual retries. No event when a lease was lost — the newer
-  attempt owns that notification's outcome. Publishing is **best-effort** (1 s timeout, errors
-  logged): a lost event must never fail or stall a delivery.
+  attempt owns that notification's outcome. Publishing is **best-effort and asynchronous**:
+  `Publish` only enqueues (bounded queue of 8192; drops are counted in a log line when full), and
+  one goroutine per process sends events in pipelined batches, in publish order, with a 1 s
+  timeout per round trip. A slow or unreachable Redis therefore never stalls a delivery or an API
+  request (the phase 7 code review found the earlier synchronous publish added two blocking round
+  trips per send). Shutdown flushes the queue for up to 2 s.
 - **One subscription per API process** (`events.Hub`), fanned out in memory to WebSocket
   connections by notification or batch ID. The hub never blocks on a subscriber: one whose buffer
   is full is dropped.

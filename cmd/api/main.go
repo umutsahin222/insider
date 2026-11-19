@@ -77,6 +77,9 @@ func run() error {
 	hub := events.NewHub(rdb, log.With("component", "event_hub"))
 	go hub.Run(ctx)
 
+	publisher := events.NewPublisher(rdb, log.With("component", "events"))
+	defer closePublisher(publisher, log) // after the HTTP server: in-flight requests may publish
+
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Store:  store,
 		Rules:  cfg.Rules,
@@ -88,7 +91,7 @@ func run() error {
 		Metrics:          metrics.NewHTTPMetrics(reg),
 		MetricsHandler:   metrics.MetricsHandler(reg),
 		Stats:            store,
-		Events:           events.NewPublisher(rdb, log.With("component", "events")),
+		Events:           publisher,
 		Stream:           hub,
 		WebSocketOrigins: cfg.WebSocketOrigins,
 		Tracing:          tracing,
@@ -125,6 +128,15 @@ func run() error {
 		return fmt.Errorf("shutting down: %w", err)
 	}
 	return nil
+}
+
+// closePublisher sends the status events still queued before exit.
+func closePublisher(p *events.Publisher, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := p.Close(ctx); err != nil {
+		log.Warn("closing event publisher", "error", err)
+	}
 }
 
 // flushTraces exports buffered spans before exit.

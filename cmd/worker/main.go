@@ -68,6 +68,7 @@ func run() error {
 	defer func() { _ = rdb.Close() }()
 
 	publisher := events.NewPublisher(rdb, log.With("component", "events"))
+	defer closePublisher(publisher, log) // runs before rdb.Close: workers are done publishing
 	reg := metrics.NewRegistry()
 	deliveryMetrics := metrics.NewDeliveryMetrics(reg)
 	limiter := ratelimit.New(rdb, cfg.RateLimitPerSecond, cfg.RateLimitBurst)
@@ -173,6 +174,15 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// closePublisher sends the status events still queued before exit.
+func closePublisher(p *events.Publisher, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := p.Close(ctx); err != nil {
+		log.Warn("closing event publisher", "error", err)
+	}
 }
 
 // flushTraces exports buffered spans before exit.

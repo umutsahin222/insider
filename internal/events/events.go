@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,25 +56,94 @@ func Unmarshal(b []byte) (domain.StatusEvent, error) {
 	}, nil
 }
 
+const (
+	publishQueueSize = 8192
+	publishBatchMax  = 256
+	publishTimeout   = time.Second
+)
+
 // Publisher publishes events. It is best-effort by design: a lost event never fails or
-// stalls a delivery, because subscribers resynchronise from the database (ADR-008).
+// stalls a delivery or a request, because subscribers resynchronise from the database
+// (ADR-008). Publish only enqueues; one background goroutine sends queued events to Redis
+// in pipelined batches, in the order they were published. When Redis is slow or down and
+// the queue is full, new events are dropped (and counted in a log line).
 type Publisher struct {
 	rdb     redis.UniversalClient
 	log     *slog.Logger
-	timeout time.Duration
+	queue   chan domain.StatusEvent
+	done    chan struct{}
+	dropped atomic.Int64
+
+	mu     sync.RWMutex // guards closed against Publish racing Close
+	closed bool
 }
 
-// NewPublisher returns a publisher on rdb.
+// NewPublisher starts a publisher on rdb. Call Close to flush and stop it.
 func NewPublisher(rdb redis.UniversalClient, log *slog.Logger) *Publisher {
-	return &Publisher{rdb: rdb, log: log, timeout: time.Second}
+	p := &Publisher{rdb: rdb, log: log, queue: make(chan domain.StatusEvent, publishQueueSize), done: make(chan struct{})}
+	go p.run()
+	return p
 }
 
-// Publish sends evs in one pipelined round trip. Errors are logged, not returned.
-func (p *Publisher) Publish(ctx context.Context, evs ...domain.StatusEvent) {
-	if len(evs) == 0 {
+// Publish enqueues evs without blocking. Events published after Close are discarded.
+func (p *Publisher) Publish(_ context.Context, evs ...domain.StatusEvent) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.timeout)
+	for _, ev := range evs {
+		select {
+		case p.queue <- ev:
+		default:
+			p.dropped.Add(1)
+		}
+	}
+}
+
+// Close stops accepting events and waits until the queued ones are sent or ctx ends.
+func (p *Publisher) Close(ctx context.Context) error {
+	p.mu.Lock()
+	if !p.closed {
+		p.closed = true
+		close(p.queue)
+	}
+	p.mu.Unlock()
+	select {
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("flushing status events: %w", ctx.Err())
+	}
+}
+
+func (p *Publisher) run() {
+	defer close(p.done)
+	batch := make([]domain.StatusEvent, 0, publishBatchMax)
+	for ev := range p.queue {
+		batch = append(batch[:0], ev)
+	fill:
+		for len(batch) < publishBatchMax {
+			select {
+			case ev, ok := <-p.queue:
+				if !ok {
+					break fill
+				}
+				batch = append(batch, ev)
+			default:
+				break fill
+			}
+		}
+		p.send(batch)
+	}
+}
+
+// send publishes evs in one pipelined round trip. Errors are logged, not returned.
+func (p *Publisher) send(evs []domain.StatusEvent) {
+	if n := p.dropped.Swap(0); n > 0 {
+		p.log.Warn("status events dropped: publish queue full", "count", n)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
 	defer cancel()
 	_, err := p.rdb.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 		for _, ev := range evs {
@@ -85,7 +156,7 @@ func (p *Publisher) Publish(ctx context.Context, evs ...domain.StatusEvent) {
 		return nil
 	})
 	if err != nil {
-		p.log.WarnContext(ctx, "publishing status events failed", "error", err, "count", len(evs))
+		p.log.Warn("publishing status events failed", "error", err, "count", len(evs))
 	}
 }
 

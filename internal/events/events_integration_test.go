@@ -70,6 +70,7 @@ func TestPublishToHub(t *testing.T) {
 	}
 
 	pub := NewPublisher(rdb, discard)
+	t.Cleanup(func() { _ = pub.Close(context.Background()) })
 	other := uuid.New()
 	ids := []uuid.UUID{uuid.New(), uuid.New()}
 	pub.Publish(ctx,

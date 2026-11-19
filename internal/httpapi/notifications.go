@@ -247,6 +247,7 @@ func (a *api) cancelNotification(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	a.events.Publish(r.Context(), domain.EventOf(n, a.now()))
 	a.log.InfoContext(observability.WithNotificationID(r.Context(), id.String()), "notification cancelled")
 	writeJSON(w, http.StatusOK, toNotificationResponse(n))
 }
@@ -264,6 +265,7 @@ func (a *api) retryNotification(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	a.events.Publish(r.Context(), domain.EventOf(n, a.now()))
 	a.log.InfoContext(observability.WithNotificationID(r.Context(), id.String()), "notification re-queued",
 		"attempts", n.Attempts, "max_attempts", n.MaxAttempts)
 	writeJSON(w, http.StatusOK, toNotificationResponse(n))
@@ -289,13 +291,19 @@ func (a *api) cancelBatch(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, domain.NotFound("batch not found"))
 		return
 	}
-	n, err := a.store.CancelBatch(r.Context(), id)
+	cancelled, err := a.store.CancelBatch(r.Context(), id)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
-	a.log.InfoContext(r.Context(), "batch cancelled", "batch_id", id, "cancelled", n)
-	writeJSON(w, http.StatusOK, map[string]any{"batch_id": id, "cancelled": n})
+	now := a.now()
+	evs := make([]domain.StatusEvent, len(cancelled))
+	for i, n := range cancelled {
+		evs[i] = domain.EventOf(n, now)
+	}
+	a.events.Publish(r.Context(), evs...)
+	a.log.InfoContext(r.Context(), "batch cancelled", "batch_id", id, "cancelled", len(cancelled))
+	writeJSON(w, http.StatusOK, map[string]any{"batch_id": id, "cancelled": len(cancelled)})
 }
 
 func (a *api) liveness(w http.ResponseWriter, _ *http.Request) {

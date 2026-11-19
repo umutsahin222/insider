@@ -179,7 +179,19 @@ func (s *fakeStore) BatchSummary(_ context.Context, id uuid.UUID) (domain.BatchS
 	return sum, nil
 }
 
-func (s *fakeStore) CancelBatch(context.Context, uuid.UUID) (int, error) { return 0, nil }
+func (s *fakeStore) CancelBatch(_ context.Context, id uuid.UUID) ([]domain.Notification, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []domain.Notification
+	for nid, n := range s.byID {
+		if n.BatchID != nil && *n.BatchID == id && n.Status == domain.StatusPending {
+			n.Status = domain.StatusCancelled
+			s.byID[nid] = n
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
 
 var fixedNow = time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 
@@ -605,5 +617,46 @@ func TestRouting(t *testing.T) {
 	}
 	if rec := do(t, h, http.MethodDelete, "/v1/notifications", ""); rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("wrong method = %d", rec.Code)
+	}
+}
+
+type recordingEvents struct {
+	mu  sync.Mutex
+	evs []domain.StatusEvent
+}
+
+func (r *recordingEvents) Publish(_ context.Context, evs ...domain.StatusEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.evs = append(r.evs, evs...)
+}
+
+func TestEvents_CancelAndRetryArePublished(t *testing.T) {
+	store, ev := newFakeStore(), &recordingEvents{}
+	deps := testDeps(store, nil)
+	deps.Events = ev
+	h := NewRouter(deps)
+
+	created := decode[notificationResponse](t, do(t, h, http.MethodPost, "/v1/notifications", validBody))
+	do(t, h, http.MethodPost, "/v1/notifications/"+created.ID.String()+"/cancel", "")
+
+	batch := decode[batchCreatedResponse](t, do(t, h, http.MethodPost, "/v1/notifications/batch", `{"items":[`+validBody+`,`+validBody+`]}`))
+	do(t, h, http.MethodPost, "/v1/batches/"+batch.BatchID.String()+"/cancel", "")
+
+	failed := decode[notificationResponse](t, do(t, h, http.MethodPost, "/v1/notifications", validBody))
+	n := store.byID[failed.ID]
+	n.Status = domain.StatusFailed
+	store.byID[failed.ID] = n
+	do(t, h, http.MethodPost, "/v1/notifications/"+failed.ID.String()+"/retry", "")
+
+	var got []string
+	for _, e := range ev.evs {
+		got = append(got, string(e.Status))
+	}
+	if strings.Join(got, ",") != "cancelled,cancelled,cancelled,pending" {
+		t.Errorf("events = %v, want 3 cancellations and 1 re-queue", got)
+	}
+	if ev.evs[0].NotificationID != created.ID {
+		t.Errorf("first event is for %s, want %s", ev.evs[0].NotificationID, created.ID)
 	}
 }

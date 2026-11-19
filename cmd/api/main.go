@@ -15,6 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/umutsahin222/insider/internal/config"
+	"github.com/umutsahin222/insider/internal/events"
 	"github.com/umutsahin222/insider/internal/httpapi"
 	"github.com/umutsahin222/insider/internal/metrics"
 	"github.com/umutsahin222/insider/internal/observability"
@@ -82,6 +83,7 @@ func run() error {
 		Metrics:        metrics.NewHTTPMetrics(reg),
 		MetricsHandler: metrics.MetricsHandler(reg),
 		Stats:          store,
+		Events:         events.NewPublisher(rdb, log.With("component", "events")),
 		Tracing:        tracing,
 	})
 

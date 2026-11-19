@@ -117,15 +117,20 @@ func (s *Store) Release(ctx context.Context, n domain.Notification, delay time.D
 }
 
 // ReapExpired returns notifications whose lease expired (crashed or stuck worker) to the
-// queue, or fails them if that was their last attempt. It returns how many rows it touched.
-func (s *Store) ReapExpired(ctx context.Context) (int, error) {
-	tag, err := s.pool.Exec(ctx, `
+// queue, or fails them if that was their last attempt. It returns the rows it changed.
+func (s *Store) ReapExpired(ctx context.Context) ([]domain.Notification, error) {
+	rows, err := s.pool.Query(ctx, `
 		UPDATE notifications SET
 			status = CASE WHEN attempts >= max_attempts THEN 'failed'::notification_status ELSE 'pending' END,
 			locked_until = NULL, next_attempt_at = now(), last_error = 'lease expired before the attempt completed'
-		WHERE status = 'processing' AND locked_until < now()`)
+		WHERE status = 'processing' AND locked_until < now()
+		RETURNING `+notificationColumns)
 	if err != nil {
-		return 0, fmt.Errorf("reaping expired leases: %w", err)
+		return nil, fmt.Errorf("reaping expired leases: %w", err)
 	}
-	return int(tag.RowsAffected()), nil
+	ns, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.Notification, error) { return scanNotification(row) })
+	if err != nil {
+		return nil, fmt.Errorf("reaping expired leases: %w", err)
+	}
+	return ns, nil
 }

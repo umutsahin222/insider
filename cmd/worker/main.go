@@ -19,6 +19,7 @@ import (
 
 	"github.com/umutsahin222/insider/internal/config"
 	"github.com/umutsahin222/insider/internal/delivery"
+	"github.com/umutsahin222/insider/internal/events"
 	"github.com/umutsahin222/insider/internal/metrics"
 	"github.com/umutsahin222/insider/internal/observability"
 	"github.com/umutsahin222/insider/internal/provider"
@@ -66,6 +67,7 @@ func run() error {
 	rdb := redis.NewClient(redisOpts)
 	defer func() { _ = rdb.Close() }()
 
+	publisher := events.NewPublisher(rdb, log.With("component", "events"))
 	reg := metrics.NewRegistry()
 	deliveryMetrics := metrics.NewDeliveryMetrics(reg)
 	limiter := ratelimit.New(rdb, cfg.RateLimitPerSecond, cfg.RateLimitBurst)
@@ -106,12 +108,12 @@ func run() error {
 			},
 		}, delivery.Deps{
 			Queue: store, Sender: sender, Limiter: limiter,
-			Metrics: deliveryMetrics, Tracing: tracing, Logger: log,
+			Metrics: deliveryMetrics, Events: publisher, Tracing: tracing, Logger: log,
 		})
 		wg.Go(func() { w.Run(ctx) })
 	}
 	wg.Go(func() {
-		delivery.RunReaper(ctx, store, cfg.ReaperInterval, deliveryMetrics, log.With("component", "reaper"))
+		delivery.RunReaper(ctx, store, cfg.ReaperInterval, deliveryMetrics, publisher, log.With("component", "reaper"))
 	})
 
 	log.Info("worker running", "channels", cfg.Channels, "provider_url", cfg.ProviderURL,

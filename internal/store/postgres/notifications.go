@@ -391,21 +391,26 @@ func (s *Store) BatchSummary(ctx context.Context, batchID uuid.UUID) (domain.Bat
 }
 
 // CancelBatch cancels every still-pending notification of a batch and returns how many.
-func (s *Store) CancelBatch(ctx context.Context, batchID uuid.UUID) (int, error) {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE notifications SET status = 'cancelled' WHERE batch_id = $1 AND status = 'pending'`, batchID)
+func (s *Store) CancelBatch(ctx context.Context, batchID uuid.UUID) ([]domain.Notification, error) {
+	rows, err := s.pool.Query(ctx, `
+		UPDATE notifications SET status = 'cancelled' WHERE batch_id = $1 AND status = 'pending'
+		RETURNING `+notificationColumns, batchID)
 	if err != nil {
-		return 0, fmt.Errorf("cancelling batch: %w", err)
+		return nil, fmt.Errorf("cancelling batch: %w", err)
 	}
-	if tag.RowsAffected() > 0 {
-		return int(tag.RowsAffected()), nil
+	cancelled, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (domain.Notification, error) { return scanNotification(row) })
+	if err != nil {
+		return nil, fmt.Errorf("cancelling batch: %w", err)
+	}
+	if len(cancelled) > 0 {
+		return cancelled, nil
 	}
 	var exists bool
-	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM notifications WHERE batch_id = $1)`, batchID).Scan(&exists); err != nil {
-		return 0, fmt.Errorf("checking batch: %w", err)
+	if err := s.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM batches WHERE id = $1)`, batchID).Scan(&exists); err != nil {
+		return nil, fmt.Errorf("checking batch: %w", err)
 	}
 	if !exists {
-		return 0, domain.NotFound("batch not found")
+		return nil, domain.NotFound("batch not found")
 	}
-	return 0, nil
+	return nil, nil
 }

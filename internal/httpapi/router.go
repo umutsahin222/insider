@@ -26,7 +26,7 @@ type NotificationStore interface {
 	CancelNotification(ctx context.Context, id uuid.UUID) (domain.Notification, error)
 	RetryNotification(ctx context.Context, id uuid.UUID, extraAttempts int) (domain.Notification, error)
 	BatchSummary(ctx context.Context, batchID uuid.UUID) (domain.BatchSummary, error)
-	CancelBatch(ctx context.Context, batchID uuid.UUID) (int, error)
+	CancelBatch(ctx context.Context, batchID uuid.UUID) ([]domain.Notification, error)
 	CreateTemplate(ctx context.Context, t domain.Template) (domain.Template, error)
 	TemplatesByName(ctx context.Context, names []string) (map[string]domain.Template, error)
 	ListTemplates(ctx context.Context) ([]domain.Template, error)
@@ -34,6 +34,16 @@ type NotificationStore interface {
 
 // Check reports whether a dependency is healthy; used by /readyz.
 type Check func(ctx context.Context) error
+
+// Events publishes status changes caused by API calls (cancel, retry); implemented by
+// events.Publisher. Best-effort: it never fails a request.
+type Events interface {
+	Publish(ctx context.Context, evs ...domain.StatusEvent)
+}
+
+type nopEvents struct{}
+
+func (nopEvents) Publish(context.Context, ...domain.StatusEvent) {}
 
 // Metrics receives API measurements; implemented by metrics.HTTPMetrics.
 type Metrics interface {
@@ -63,6 +73,8 @@ type Deps struct {
 	MetricsHandler http.Handler
 	// Stats, if set, serves GET /v1/stats.
 	Stats StatsStore
+	// Events announces cancellations and manual retries; nil publishes nothing.
+	Events Events
 	// Tracing creates a server span per request and its context is stored with every
 	// notification for the worker to continue; nil propagates context without recording.
 	Tracing *observability.Tracing
@@ -81,6 +93,7 @@ type api struct {
 	now        func() time.Time
 	metrics    Metrics
 	stats      StatsStore
+	events     Events
 	propagator propagation.TextMapPropagator
 }
 
@@ -92,6 +105,10 @@ func NewRouter(d Deps) http.Handler {
 	}
 	if a.metrics == nil {
 		a.metrics = nopMetrics{}
+	}
+	a.events = d.Events
+	if a.events == nil {
+		a.events = nopEvents{}
 	}
 	tracing := d.Tracing
 	if tracing == nil {

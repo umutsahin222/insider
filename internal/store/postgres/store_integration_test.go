@@ -279,12 +279,12 @@ func TestCancelBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	n, err := testStore.CancelBatch(ctx, batchID)
-	if err != nil || n != 1 {
-		t.Fatalf("cancelled=%d err=%v, want 1", n, err)
+	cancelled, err := testStore.CancelBatch(ctx, batchID)
+	if err != nil || len(cancelled) != 1 || cancelled[0].ID != ns[1].ID || cancelled[0].Status != domain.StatusCancelled {
+		t.Fatalf("cancelled=%+v err=%v, want only the second notification", cancelled, err)
 	}
-	if n, err := testStore.CancelBatch(ctx, batchID); err != nil || n != 0 {
-		t.Errorf("repeat: cancelled=%d err=%v, want 0", n, err)
+	if again, err := testStore.CancelBatch(ctx, batchID); err != nil || len(again) != 0 {
+		t.Errorf("repeat: cancelled=%d err=%v, want 0", len(again), err)
 	}
 	if _, err := testStore.CancelBatch(ctx, uuid.New()); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("unknown batch: err = %v", err)

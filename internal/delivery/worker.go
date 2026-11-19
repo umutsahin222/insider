@@ -58,6 +58,7 @@ type Worker struct {
 	sender     Sender
 	limiter    Limiter
 	metrics    Metrics
+	events     Events
 	tracer     trace.Tracer
 	propagator propagation.TextMapPropagator
 	log        *slog.Logger
@@ -71,6 +72,8 @@ type Deps struct {
 	Sender  Sender
 	Limiter Limiter
 	Metrics Metrics
+	// Events announces status changes; nil publishes nothing.
+	Events Events
 	// Tracing continues the trace stored with each notification; nil records nothing.
 	Tracing *observability.Tracing
 	Logger  *slog.Logger
@@ -85,13 +88,17 @@ func NewWorker(cfg Config, d Deps) *Worker {
 	if m == nil {
 		m = NopMetrics{}
 	}
+	ev := d.Events
+	if ev == nil {
+		ev = NopEvents{}
+	}
 	tracing := d.Tracing
 	if tracing == nil {
 		tracing = observability.DisabledTracing()
 	}
 	log := d.Logger.With("channel", string(cfg.Channel))
 	w := &Worker{
-		cfg: cfg, queue: d.Queue, sender: d.Sender, limiter: d.Limiter, metrics: m,
+		cfg: cfg, queue: d.Queue, sender: d.Sender, limiter: d.Limiter, metrics: m, events: ev,
 		tracer: tracing.Provider.Tracer(observability.TracerName), propagator: tracing.Propagator,
 		log: log, randN: rand.Int64N,
 	}
@@ -178,6 +185,8 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 			attribute.Int("notification.max_attempts", n.MaxAttempts),
 		))
 	defer span.End()
+	// The claim already moved the row to processing; announce it.
+	w.events.Publish(ctx, n.Transitioned(domain.StatusProcessing, nil, time.Now()))
 
 	// The breaker may have opened while this claimed batch was being worked through: hand the
 	// rest back before taking a rate-limit token that another replica could have used.
@@ -276,9 +285,12 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 		result = ResultStoreError
 		// The lease will expire and the reaper will return the row to the queue.
 		w.log.ErrorContext(ctx, "recording outcome failed", "error", storeErr)
-	case result == ResultSent:
-		// Worker clock vs. database timestamps: clamp the rare, small skew to zero.
-		w.metrics.Delivered(w.cfg.Channel, max(time.Since(dueAt(n)), 0))
+	default:
+		if result == ResultSent {
+			// Worker clock vs. database timestamps: clamp the rare, small skew to zero.
+			w.metrics.Delivered(w.cfg.Channel, max(time.Since(dueAt(n)), 0))
+		}
+		w.events.Publish(workCtx, n.Transitioned(resultStatus[result], attempt.Error, time.Now()))
 	}
 	w.metrics.AttemptFinished(w.cfg.Channel, outcome, result, duration)
 
@@ -291,15 +303,28 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 	}
 }
 
+// resultStatus is the notification status each recorded result leaves behind.
+var resultStatus = map[Result]domain.Status{
+	ResultSent:   domain.StatusSent,
+	ResultRetry:  domain.StatusPending,
+	ResultFailed: domain.StatusFailed,
+}
+
 func (w *Worker) release(ctx context.Context, n domain.Notification, delay time.Duration, reason ReleaseReason) {
 	w.metrics.Released(w.cfg.Channel, reason)
 	trace.SpanFromContext(ctx).SetAttributes(
 		attribute.String("delivery.result", "released"), attribute.String("delivery.release_reason", string(reason)))
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	if err := w.queue.Release(ctx, n, delay); err != nil && !errors.Is(err, domain.ErrLeaseLost) {
-		w.log.ErrorContext(ctx, "release failed", "error", err, "notification_id", n.ID.String(), "reason", string(reason))
+	if err := w.queue.Release(ctx, n, delay); err != nil {
+		if !errors.Is(err, domain.ErrLeaseLost) {
+			w.log.ErrorContext(ctx, "release failed", "error", err, "notification_id", n.ID.String(), "reason", string(reason))
+		}
+		return
 	}
+	released := n
+	released.Attempts-- // Release hands the attempt back
+	w.events.Publish(ctx, released.Transitioned(domain.StatusPending, nil, time.Now()))
 }
 
 func (w *Worker) releaseAll(ns []domain.Notification, delay time.Duration, reason ReleaseReason) {

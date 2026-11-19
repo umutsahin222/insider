@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"context"
 	"time"
 
 	"github.com/umutsahin222/insider/internal/domain"
@@ -55,6 +56,17 @@ type Metrics interface {
 	// Reclaimed counts notifications whose expired lease the reaper took back.
 	Reclaimed(n int)
 }
+
+// Events publishes status changes; implemented by events.Publisher. It is best-effort:
+// implementations must not fail or stall delivery (subscribers resync from the database).
+type Events interface {
+	Publish(ctx context.Context, evs ...domain.StatusEvent)
+}
+
+// NopEvents publishes nothing.
+type NopEvents struct{}
+
+func (NopEvents) Publish(context.Context, ...domain.StatusEvent) {}
 
 // NopMetrics discards every measurement.
 type NopMetrics struct{}

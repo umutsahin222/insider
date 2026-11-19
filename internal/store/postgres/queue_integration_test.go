@@ -278,8 +278,15 @@ func TestReaper(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 
 	reaped, err := testStore.ReapExpired(ctx)
-	if err != nil || reaped != 2 {
-		t.Fatalf("reaped %d, err %v; want 2", reaped, err)
+	if err != nil || len(reaped) != 2 {
+		t.Fatalf("reaped %d, err %v; want 2", len(reaped), err)
+	}
+	statuses := map[uuid.UUID]domain.Status{}
+	for _, n := range reaped {
+		statuses[n.ID] = n.Status
+	}
+	if statuses[zombie.ID] != domain.StatusPending || statuses[last.ID] != domain.StatusFailed {
+		t.Errorf("returned statuses = %v, want zombie pending and last failed", statuses)
 	}
 	if got, _ := testStore.GetNotification(ctx, last.ID); got.Status != domain.StatusFailed {
 		t.Errorf("exhausted notification status = %s, want failed", got.Status)

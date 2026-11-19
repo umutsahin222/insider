@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sony/gobreaker/v2"
 
 	"github.com/umutsahin222/insider/internal/domain"
 )
@@ -95,8 +96,11 @@ func testConfig() Config {
 	return Config{
 		Channel: domain.ChannelSMS, Concurrency: 2, BatchSize: 5, Lease: time.Minute,
 		PollInterval: 5 * time.Millisecond, SendTimeout: time.Second,
-		Retry:           RetryPolicy{Base: 2 * time.Second, Max: 5 * time.Minute},
-		BreakerFailures: 3, BreakerOpenTimeout: time.Minute,
+		Retry: RetryPolicy{Base: 2 * time.Second, Max: 5 * time.Minute},
+		Breaker: BreakerPolicy{
+			ConsecutiveFailures: 3, FailureRatio: 0.5, MinRequests: 20,
+			Window: time.Minute, OpenTimeout: time.Minute,
+		},
 	}
 }
 
@@ -413,6 +417,77 @@ func TestReaper_ReportsReclaimed(t *testing.T) {
 type reaperFunc func(context.Context) (int, error)
 
 func (f reaperFunc) ReapExpired(ctx context.Context) (int, error) { return f(ctx) }
+
+func TestBreakerPolicy(t *testing.T) {
+	p := BreakerPolicy{ConsecutiveFailures: 10, FailureRatio: 0.5, MinRequests: 20}
+	tests := []struct {
+		name string
+		c    gobreaker.Counts
+		want bool
+	}{
+		{"healthy", gobreaker.Counts{Requests: 100, TotalFailures: 5, ConsecutiveFailures: 1}, false},
+		{"noisy but working (30%)", gobreaker.Counts{Requests: 100, TotalFailures: 30, ConsecutiveFailures: 4}, false},
+		{"mostly failing", gobreaker.Counts{Requests: 40, TotalFailures: 20, ConsecutiveFailures: 2}, true},
+		{"high ratio but too few calls to judge", gobreaker.Counts{Requests: 8, TotalFailures: 6, ConsecutiveFailures: 3}, false},
+		{"hard outage at low traffic", gobreaker.Counts{Requests: 10, TotalFailures: 10, ConsecutiveFailures: 10}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := p.shouldTrip(tt.c); got != tt.want {
+				t.Errorf("shouldTrip(%+v) = %v, want %v", tt.c, got, tt.want)
+			}
+		})
+	}
+}
+
+// sequenceSender replies with the given status codes in order, cycling.
+type sequenceSender struct {
+	mu    sync.Mutex
+	codes []int
+	sent  int
+}
+
+func (s *sequenceSender) Send(context.Context, domain.Notification) (domain.ProviderReply, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	code := s.codes[s.sent%len(s.codes)]
+	s.sent++
+	return domain.ProviderReply{StatusCode: code}, nil
+}
+
+func TestBreaker_RandomFailuresDoNotStopAWorkingChannel(t *testing.T) {
+	cfg := testConfig()
+	cfg.Breaker = BreakerPolicy{ConsecutiveFailures: 10, FailureRatio: 0.5, MinRequests: 20, Window: time.Minute, OpenTimeout: time.Minute}
+	// 30% failures with streaks of up to 3: the old "5 in a row" rule would survive this,
+	// but streaks of 5 happen naturally at 30% — see TestBreakerPolicy for that case.
+	s := &sequenceSender{codes: []int{503, 503, 503, 202, 202, 202, 202, 202, 202, 202}}
+	q := &fakeQueue{}
+	w := NewWorker(cfg, q, s, allow, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	for range 200 {
+		w.process(context.Background(), claimed(1, 5))
+	}
+	if s.sent != 200 {
+		t.Errorf("provider called %d times, want 200: a 30%% failing provider must not be cut off", s.sent)
+	}
+}
+
+func TestBreaker_OpensOnFailureRatio(t *testing.T) {
+	cfg := testConfig()
+	cfg.Breaker = BreakerPolicy{ConsecutiveFailures: 100, FailureRatio: 0.5, MinRequests: 20, Window: time.Minute, OpenTimeout: time.Minute}
+	// Alternating fail/success never builds a streak but is a 50% failure rate.
+	s := &sequenceSender{codes: []int{503, 202}}
+	w := NewWorker(cfg, &fakeQueue{}, s, allow, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	for range 40 {
+		w.process(context.Background(), claimed(1, 5))
+	}
+	// gobreaker evaluates the trip rule after each failure: call 20 succeeds, call 21 fails
+	// with 11/21 ≥ 50% and opens the breaker.
+	if s.sent != 21 {
+		t.Errorf("provider called %d times, want 21", s.sent)
+	}
+}
 
 type cancelingSender struct{ cancel context.CancelFunc }
 

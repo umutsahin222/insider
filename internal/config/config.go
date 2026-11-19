@@ -84,8 +84,14 @@ type Worker struct {
 	RetryBase time.Duration
 	RetryMax  time.Duration
 
-	BreakerFailures    int
-	BreakerOpenTimeout time.Duration
+	// Circuit breaker (ADR-002): opens on BreakerFailures consecutive retryable failures, or
+	// on a failure ratio of BreakerFailureRatio over at least BreakerMinRequests calls
+	// within BreakerWindow.
+	BreakerFailures     int
+	BreakerFailureRatio float64
+	BreakerMinRequests  int
+	BreakerWindow       time.Duration
+	BreakerOpenTimeout  time.Duration
 }
 
 // LoadWorker reads the worker configuration from the environment.
@@ -118,17 +124,26 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 		RetryBase: e.duration("RETRY_BASE", 2*time.Second),
 		RetryMax:  e.duration("RETRY_MAX", 5*time.Minute),
 
-		BreakerFailures:    e.int("BREAKER_FAILURES", 5),
-		BreakerOpenTimeout: e.duration("BREAKER_OPEN_TIMEOUT", 30*time.Second),
+		BreakerFailures:     e.int("BREAKER_FAILURES", 10),
+		BreakerFailureRatio: e.float("BREAKER_FAILURE_RATIO", 0.5),
+		BreakerMinRequests:  e.int("BREAKER_MIN_REQUESTS", 20),
+		BreakerWindow:       e.duration("BREAKER_WINDOW", 10*time.Second),
+		BreakerOpenTimeout:  e.duration("BREAKER_OPEN_TIMEOUT", 30*time.Second),
 	}
 	for name, v := range map[string]int{
 		"WORKER_CONCURRENCY": cfg.Concurrency, "CLAIM_BATCH_SIZE": cfg.ClaimBatchSize,
 		"RATE_LIMIT_PER_SECOND": int(cfg.RateLimitPerSecond), "RATE_LIMIT_BURST": cfg.RateLimitBurst,
-		"BREAKER_FAILURES": cfg.BreakerFailures,
+		"BREAKER_FAILURES": cfg.BreakerFailures, "BREAKER_MIN_REQUESTS": cfg.BreakerMinRequests,
 	} {
 		if v < 1 {
 			e.errs = append(e.errs, fmt.Errorf("%s must be positive", name))
 		}
+	}
+	if cfg.BreakerFailureRatio <= 0 || cfg.BreakerFailureRatio > 1 {
+		e.errs = append(e.errs, errors.New("BREAKER_FAILURE_RATIO must be in (0, 1]"))
+	}
+	if cfg.BreakerWindow <= 0 || cfg.BreakerOpenTimeout <= 0 {
+		e.errs = append(e.errs, errors.New("BREAKER_WINDOW and BREAKER_OPEN_TIMEOUT must be positive"))
 	}
 	// A lease shorter than the worst-case send would let the reaper hand live work to
 	// another worker and cause duplicate sends.
@@ -165,6 +180,19 @@ func (e *env) int(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func (e *env) float(key string, def float64) float64 {
+	v, ok := e.lookup(key)
+	if !ok || v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		e.errs = append(e.errs, fmt.Errorf("%s: %w", key, err))
+		return def
+	}
+	return f
 }
 
 func (e *env) duration(key string, def time.Duration) time.Duration {

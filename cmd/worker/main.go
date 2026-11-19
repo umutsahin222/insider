@@ -82,15 +82,20 @@ func run() error {
 	var wg sync.WaitGroup
 	for _, ch := range cfg.Channels {
 		w := delivery.NewWorker(delivery.Config{
-			Channel:            ch,
-			Concurrency:        cfg.Concurrency,
-			BatchSize:          cfg.ClaimBatchSize,
-			Lease:              cfg.Lease,
-			PollInterval:       cfg.PollInterval,
-			SendTimeout:        cfg.ProviderTimeout,
-			Retry:              delivery.RetryPolicy{Base: cfg.RetryBase, Max: cfg.RetryMax},
-			BreakerFailures:    uint32(cfg.BreakerFailures),
-			BreakerOpenTimeout: cfg.BreakerOpenTimeout,
+			Channel:      ch,
+			Concurrency:  cfg.Concurrency,
+			BatchSize:    cfg.ClaimBatchSize,
+			Lease:        cfg.Lease,
+			PollInterval: cfg.PollInterval,
+			SendTimeout:  cfg.ProviderTimeout,
+			Retry:        delivery.RetryPolicy{Base: cfg.RetryBase, Max: cfg.RetryMax},
+			Breaker: delivery.BreakerPolicy{
+				ConsecutiveFailures: uint32(cfg.BreakerFailures),
+				FailureRatio:        cfg.BreakerFailureRatio,
+				MinRequests:         uint32(cfg.BreakerMinRequests),
+				Window:              cfg.BreakerWindow,
+				OpenTimeout:         cfg.BreakerOpenTimeout,
+			},
 		}, store, sender, limiter, deliveryMetrics, log)
 		wg.Go(func() { w.Run(ctx) })
 	}

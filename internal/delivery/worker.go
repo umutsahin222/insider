@@ -43,9 +43,7 @@ type Config struct {
 	PollInterval time.Duration // idle wait when the queue is empty
 	SendTimeout  time.Duration // per provider call
 	Retry        RetryPolicy
-
-	BreakerFailures    uint32        // consecutive retryable failures that open the breaker
-	BreakerOpenTimeout time.Duration // how long the breaker stays open before probing
+	Breaker      BreakerPolicy
 }
 
 // Worker delivers the notifications of a single channel. Each channel has its own worker,
@@ -74,8 +72,9 @@ func NewWorker(cfg Config, q Queue, s Sender, l Limiter, m Metrics, log *slog.Lo
 	w.breaker = gobreaker.NewCircuitBreaker[domain.ProviderReply](gobreaker.Settings{
 		Name:        string(cfg.Channel),
 		MaxRequests: 1, // a single probe in half-open state
-		Timeout:     cfg.BreakerOpenTimeout,
-		ReadyToTrip: func(c gobreaker.Counts) bool { return c.ConsecutiveFailures >= cfg.BreakerFailures },
+		Interval:    cfg.Breaker.Window,
+		Timeout:     cfg.Breaker.OpenTimeout,
+		ReadyToTrip: cfg.Breaker.shouldTrip,
 		OnStateChange: func(name string, from, to gobreaker.State) {
 			log.Warn("circuit breaker state changed", "from", from.String(), "to", to.String())
 			m.BreakerStateChanged(cfg.Channel, breakerState(to))
@@ -143,7 +142,7 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 	// The breaker may have opened while this claimed batch was being worked through: hand the
 	// rest back before taking a rate-limit token that another replica could have used.
 	if w.breaker.State() == gobreaker.StateOpen {
-		w.release(ctx, n, w.cfg.BreakerOpenTimeout, ReleaseBreakerOpen)
+		w.release(ctx, n, w.cfg.Breaker.OpenTimeout, ReleaseBreakerOpen)
 		return
 	}
 
@@ -180,7 +179,7 @@ func (w *Worker) process(ctx context.Context, n domain.Notification) {
 
 	switch {
 	case errors.Is(err, gobreaker.ErrOpenState):
-		w.release(workCtx, n, w.cfg.BreakerOpenTimeout, ReleaseBreakerOpen)
+		w.release(workCtx, n, w.cfg.Breaker.OpenTimeout, ReleaseBreakerOpen)
 		return
 	case errors.Is(err, gobreaker.ErrTooManyRequests): // half-open, and its single probe is in flight
 		w.release(workCtx, n, w.cfg.PollInterval, ReleaseBreakerHalfOpen)

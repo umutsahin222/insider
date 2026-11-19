@@ -49,7 +49,8 @@ func TestLoadWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 || cfg.HTTPAddr != ":9091" {
+	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 || cfg.HTTPAddr != ":9091" ||
+		cfg.BreakerFailures != 10 || cfg.BreakerFailureRatio != 0.5 || cfg.BreakerMinRequests != 20 {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
 
@@ -62,6 +63,9 @@ func TestLoadWorker(t *testing.T) {
 		"unknown channel":                     {"CHANNELS": "sms,fax"},
 		"zero concurrency":                    {"WORKER_CONCURRENCY": "0"},
 		"lease shorter than a batch of sends": {"LEASE_DURATION": "10s", "PROVIDER_TIMEOUT": "5s", "CLAIM_BATCH_SIZE": "10"},
+		"breaker ratio above 1":               {"BREAKER_FAILURE_RATIO": "1.5"},
+		"breaker ratio not a number":          {"BREAKER_FAILURE_RATIO": "half"},
+		"zero breaker window":                 {"BREAKER_WINDOW": "0s"},
 	}
 	for name, env := range tests {
 		if _, err := loadWorker(lookupFrom(env)); err == nil {

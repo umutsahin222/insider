@@ -17,14 +17,14 @@ jobs:
     name: Lint (Go + OpenAPI)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: go vet
         run: go vet ./... && go vet -tags integration ./...
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v8
+        uses: golangci/golangci-lint-action@v9
         with:
           version: v2.15.0
       - name: OpenAPI contract
@@ -34,8 +34,8 @@ jobs:
     name: Tests (unit + integration, -race)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       # Integration tests start Postgres and Redis with testcontainers on the runner's Docker.
@@ -46,7 +46,7 @@ jobs:
     name: End-to-end (docker compose + smoke test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Start the stack
         run: docker compose up --build -d --wait --wait-timeout 300
       - name: Smoke test

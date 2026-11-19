@@ -35,3 +35,41 @@ type BatchSummary struct {
 	Total   int
 	Counts  map[Status]int
 }
+
+// QueueDepth counts the unfinished notifications of one channel and priority.
+type QueueDepth struct {
+	Channel  Channel
+	Priority Priority
+	// Ready notifications are pending and due: they would be claimed by an idle worker now.
+	Ready int
+	// Delayed notifications are pending but not yet due (scheduled, or backing off a retry).
+	Delayed int
+	// Processing notifications are claimed by a worker.
+	Processing int
+	// OldestReadyAge is how long the oldest ready notification has been due ("queue lag");
+	// zero when nothing is ready.
+	OldestReadyAge time.Duration
+}
+
+// Percentiles summarises a latency distribution.
+type Percentiles struct {
+	P50, P95, P99 time.Duration
+}
+
+// DeliveryStats summarises one channel's delivery activity over a time window.
+type DeliveryStats struct {
+	Channel Channel
+	// Provider calls in the window, by outcome.
+	Attempts        int
+	Succeeded       int
+	RetryableErrors int
+	PermanentErrors int
+	// ProviderLatency is the duration of a single provider call.
+	ProviderLatency Percentiles
+	// Notifications that reached a final state in the window.
+	Sent   int
+	Failed int
+	// EndToEndLatency runs from when a sent notification became due (created, or its
+	// scheduled time) until it was sent, including queueing and retries.
+	EndToEndLatency Percentiles
+}

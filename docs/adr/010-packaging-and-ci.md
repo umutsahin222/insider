@@ -24,7 +24,8 @@ observability tools from ADR-007.
   every replica through DNS service discovery on the compose service name.
 - `PROVIDER_URL` switches from the mock (default, 10 % failures so retries are visible) to
   webhook.site without code changes.
-- **`scripts/smoke.sh`** drives the public API end to end (templates, idempotent replay,
+- **`scripts/smoke.sh`** drives the public API end to end (rate limit as the provider sees it:
+  300 SMS, and the mock's busiest second must stay within 100; templates, idempotent replay,
   validation, a 30-item mixed batch until all are sent, stats, metrics, Prometheus scraping every
   worker). It needs only bash, curl and grep, and runs locally (`make smoke`) and in CI.
 - **CI (GitHub Actions)** runs three parallel jobs: lint (go vet incl. the integration build tag,

@@ -7,6 +7,7 @@ set -euo pipefail
 
 API="${API_URL:-http://localhost:8080}"
 PROM="${PROMETHEUS_URL:-http://localhost:9090}"
+MOCK="${MOCK_PROVIDER_URL:-http://localhost:8090}"
 TIMEOUT="${SMOKE_TIMEOUT:-90}"
 RUN="smoke-$(date +%s)-$RANDOM"
 
@@ -80,6 +81,30 @@ while :; do
   sleep 1
 done
 pass "template notification sent (with delivery attempts recorded)"
+
+# The rate limit as the provider sees it (when the mock provider is running): 300 SMS at once,
+# then the mock's busiest second must stay within 100 requests, across every worker replica.
+if curl -sf "$MOCK/healthz" >/dev/null 2>&1; then
+  items=""
+  for i in $(seq 1 300); do
+    items+="{\"channel\":\"sms\",\"recipient\":\"+90556$(printf '%07d' "$i")\",\"content\":\"rate $i\"},"
+  done
+  out=$(post /v1/notifications/batch "{\"items\":[${items%,}]}")
+  [[ ${out%% *} == 201 ]] || fail "create rate batch: $out"
+  rbatch=$(echo "$out" | json_field batch_id)
+  start=$SECONDS
+  deadline=$((SECONDS + TIMEOUT))
+  while :; do
+    summary=$(curl -s "$API/v1/batches/$rbatch")
+    done_count=$(( $(echo "$summary" | json_number sent) + $(echo "$summary" | json_number failed) ))
+    ((done_count == 300)) && break
+    ((SECONDS < deadline)) || fail "rate batch not finished in ${TIMEOUT}s: $summary"
+    sleep 1
+  done
+  peak=$(curl -s "$MOCK/stats" | grep -o '"sms":[0-9]*' | head -1 | cut -d: -f2)
+  [[ -n $peak ]] && ((peak <= 100)) || fail "provider saw ${peak:-?} SMS within one second (limit 100)"
+  pass "300 SMS in $((SECONDS - start))s; busiest second at the provider: $peak (limit 100)"
+fi
 
 stats=$(curl -s "$API/v1/stats?window=10m")
 echo "$stats" | grep -q '"success_rate":[0-9]' || fail "stats: $stats"

@@ -52,6 +52,13 @@ correct when that transport hiccups.
   for loss (1013 → resnapshot) instead of an implicit one.
 - + Verified end to end: a stream outlived the 30 s server timeout; restarting Redis closed open
   streams with 1013, the hub resubscribed within 1 s and reconnecting clients saw the full flow.
+- Found in the final audit and fixed: go-redis reads pub/sub messages without watching the
+  context, so on shutdown the hub stayed blocked for up to its 30 s idle timeout before dropping
+  subscribers, and clients saw an abrupt disconnect instead of 1013. `Hub.Run` now closes the
+  subscription when its context ends (back within milliseconds), and Redis clients run with
+  `ContextTimeoutEnabled` so the publisher's 1 s timeout applies to socket I/O too. Integration
+  tests cover both a killed Redis connection (subscribers dropped, hub resubscribes, events flow
+  again) and prompt shutdown.
 - − Every API process receives every event (≈3 per notification); at very high volume, shard the
   channel (e.g. by batch ID hash) or move to Streams.
 - − Events published while an API process is disconnected from Redis are lost for its clients;

@@ -248,11 +248,17 @@ func (h *Hub) DropAll() {
 	}
 }
 
-// Run consumes the Redis channel until ctx is done. If the connection breaks, every
-// subscription is dropped (events published meanwhile are lost) and Run reconnects.
+// Run consumes the Redis channel until ctx is done, then drops every subscription and
+// returns. If the connection breaks, every subscription is dropped (events published
+// meanwhile are lost) and Run reconnects.
 func (h *Hub) Run(ctx context.Context) {
 	ps := h.rdb.Subscribe(ctx, Channel)
 	defer func() { _ = ps.Close() }()
+	// go-redis reads pub/sub messages without watching ctx, so a cancelled Run would sit in
+	// ReceiveTimeout until the idle timeout (30 s) — long after shutdown began, leaving
+	// WebSocket clients without their 1013 close. Closing the subscription unblocks the read.
+	stop := context.AfterFunc(ctx, func() { _ = ps.Close() })
+	defer stop()
 	for {
 		msg, err := ps.ReceiveTimeout(ctx, h.idle)
 		if err != nil {

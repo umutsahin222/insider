@@ -49,6 +49,7 @@ func run(m *testing.M) int {
 func TestPublishToHub(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	waitSubscribers(t, ctx, 0)
 	hub := NewHub(rdb, discard)
 	go hub.Run(ctx)
 
@@ -56,18 +57,7 @@ func TestPublishToHub(t *testing.T) {
 	sub := hub.Subscribe(func(e domain.StatusEvent) bool { return e.BatchID != nil && *e.BatchID == batch }, 16)
 	defer sub.Close()
 
-	// Wait until the hub's Redis subscription is live: PUBLISH returns the receiver count.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		n, err := rdb.PubSubNumSub(ctx, Channel).Result()
-		if err == nil && n[Channel] > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("hub never subscribed")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitSubscribers(t, ctx, 1)
 
 	pub := NewPublisher(rdb, discard)
 	t.Cleanup(func() { _ = pub.Close(context.Background()) })
@@ -92,4 +82,89 @@ func TestPublishToHub(t *testing.T) {
 	if got[0].NotificationID != ids[0] || got[1].NotificationID != ids[1] || got[1].Status != domain.StatusSent {
 		t.Errorf("events = %+v, want the two batch events in publish order", got)
 	}
+}
+
+// waitSubscribers waits until exactly want connections are subscribed to the event channel.
+// Tests wait for 0 before starting a hub, so a previous test's hub that is still shutting
+// down is never mistaken for (or killed instead of) the one under test.
+func waitSubscribers(t *testing.T, ctx context.Context, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		n, err := rdb.PubSubNumSub(ctx, Channel).Result()
+		if err == nil && n[Channel] == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("subscribers = %v (err %v), want %d", n[Channel], err, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestHub_ResubscribesAfterLosingRedis kills the hub's pub/sub connection on the Redis side,
+// as a Redis restart or a network failure would. Every local subscriber must be told (its
+// channel closes, so a WebSocket client reconnects and gets a fresh snapshot instead of
+// silently missing events), and the hub must subscribe again and keep delivering.
+func TestHub_ResubscribesAfterLosingRedis(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waitSubscribers(t, ctx, 0)
+	hub := NewHub(rdb, discard)
+	go hub.Run(ctx)
+	waitSubscribers(t, ctx, 1)
+
+	before := hub.Subscribe(func(domain.StatusEvent) bool { return true }, 16)
+	if n, err := rdb.ClientKillByFilter(ctx, "TYPE", "pubsub").Result(); err != nil || n != 1 {
+		t.Fatalf("killing the hub's pub/sub connection: killed %d, err %v", n, err)
+	}
+	select {
+	case _, ok := <-before.Events():
+		if ok {
+			t.Fatal("got an event; want the subscription closed after the connection was lost")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("subscriber was not dropped after the connection was lost")
+	}
+
+	waitSubscribers(t, ctx, 1) // the hub subscribed again on a new connection
+	after := hub.Subscribe(func(domain.StatusEvent) bool { return true }, 16)
+	defer after.Close()
+	pub := NewPublisher(rdb, discard)
+	t.Cleanup(func() { _ = pub.Close(context.Background()) })
+	id := uuid.New()
+	pub.Publish(ctx, domain.StatusEvent{NotificationID: id, Status: domain.StatusSent, Attempts: 1, OccurredAt: time.Now()})
+	select {
+	case e, ok := <-after.Events():
+		if !ok || e.NotificationID != id {
+			t.Fatalf("event = %+v (open %v), want the one published after reconnecting", e, ok)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event after the hub resubscribed")
+	}
+}
+
+// TestHub_RunStopsPromptlyOnCancel: on shutdown the hub must let go of Redis and drop its
+// subscribers at once, so WebSocket clients get their 1013 close and reconnect elsewhere.
+// go-redis reads pub/sub messages without watching the context, so this needs Run's help.
+func TestHub_RunStopsPromptlyOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waitSubscribers(t, ctx, 0)
+	hub := NewHub(rdb, discard)
+	done := make(chan struct{})
+	go func() { hub.Run(ctx); close(done) }()
+	waitSubscribers(t, ctx, 1)
+	sub := hub.Subscribe(func(domain.StatusEvent) bool { return true }, 16)
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return within 2 s of cancellation")
+	}
+	if _, ok := <-sub.Events(); ok {
+		t.Error("subscription still open after Run returned")
+	}
+	waitSubscribers(t, context.Background(), 0)
 }

@@ -64,6 +64,10 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("parsing REDIS_URL: %w", err)
 	}
+	// Apply context deadlines to Redis I/O (go-redis ignores them by default and falls back to
+	// its 5 s read timeout), so readiness checks, event publishes and rate-limit waits stop
+	// when their contexts say so.
+	redisOpts.ContextTimeoutEnabled = true
 	rdb := redis.NewClient(redisOpts)
 	defer func() { _ = rdb.Close() }()
 

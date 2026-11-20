@@ -381,7 +381,7 @@ the mock provider for load.
 ```bash
 make test-unit    # fast: unit tests only
 make test         # unit + integration (testcontainers: real Postgres and Redis; Docker needed), -race
-make lint         # go vet (incl. the integration build tag) + golangci-lint
+make lint         # go vet (also with the integration and acceptance build tags) + golangci-lint
 make lint-api     # OpenAPI contract (Redocly, via Docker)
 make migrate-up   # migrations through the compose migrate service
 ```

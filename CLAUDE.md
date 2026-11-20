@@ -4,10 +4,11 @@ Guidance for Claude Code when working in this repository.
 
 ## Project
 Event-driven notification system (SMS / Email / Push) for the Insider One assessment.
-Two binaries share one codebase:
-- `cmd/api` – HTTP API (chi), WebSocket fan-out, `/metrics` (incl. queue depth), `/v1/stats`
-- `cmd/worker` – per-channel delivery workers (claim → rate-limit → send → retry); `/metrics`, `/healthz`, `/readyz` on `:9091`
-- `cmd/mockprovider` – local stand-in for webhook.site with configurable failure rate/latency
+Two scalable services and two tools share one codebase (four binaries, one image):
+- `cmd/api` – HTTP API (chi), WebSocket fan-out, `/metrics` (incl. queue depth), `/v1/stats`, `/docs`
+- `cmd/worker` – per-channel delivery workers (claim → rate-limit slot → send → retry); `/metrics`, `/healthz`, `/readyz` on `:9091`
+- `cmd/mockprovider` – local stand-in for webhook.site with configurable failure rate/latency and per-channel arrival peaks
+- `cmd/healthcheck` – tiny probe for container health checks (the distroless image has no curl)
 
 PostgreSQL is both the source of truth **and** the queue (`FOR UPDATE SKIP LOCKED`).
 Redis is used for the distributed rate limiter and status-event pub/sub. See `docs/adr/`.

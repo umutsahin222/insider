@@ -35,7 +35,8 @@ func correlation(next http.Handler) http.Handler {
 }
 
 // observe writes one structured access-log line per request and records request metrics.
-// Both use the matched route pattern, which keeps metric cardinality bounded.
+// Metric labels and span names use the matched route pattern and a normalised method, so
+// clients cannot create unbounded series: net/http accepts any token as a method.
 func (a *api) observe(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -51,9 +52,10 @@ func (a *api) observe(next http.Handler) http.Handler {
 		if status == 0 { // handler wrote nothing: net/http sends 200
 			status = http.StatusOK
 		}
-		a.metrics.ObserveRequest(r.Method, route, status, elapsed)
+		method := knownMethod(r.Method)
+		a.metrics.ObserveRequest(method, route, status, elapsed)
 		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
-			span.SetName(r.Method + " " + route)
+			span.SetName(method + " " + route)
 			span.SetAttributes(semconv.HTTPRoute(route))
 		}
 
@@ -67,6 +69,18 @@ func (a *api) observe(next http.Handler) http.Handler {
 			"status", status, "bytes", ww.BytesWritten(),
 			"duration_ms", elapsed.Milliseconds())
 	})
+}
+
+// knownMethod maps the request method onto a closed set: the standard methods, and "OTHER"
+// for anything else (as OpenTelemetry's semantic conventions do with "_OTHER").
+func knownMethod(m string) string {
+	switch m {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodConnect, http.MethodOptions, http.MethodTrace:
+		return m
+	default:
+		return "OTHER"
+	}
 }
 
 // recoverer turns a handler panic into a logged 500 instead of a dropped connection.

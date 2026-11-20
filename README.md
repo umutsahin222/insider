@@ -310,7 +310,7 @@ The spec leaves this to the candidate. Full reasoning is in
     `notification_provider_request_duration_seconds`, `notification_end_to_end_latency_seconds`,
     `notification_rate_limit_wait_seconds`, `notification_releases_total{reason}`,
     `notification_circuit_breaker_state`, `notification_reaper_reclaimed_total`.
-  - Labels only come from closed sets (channel, priority, outcome, route pattern), never IDs.
+  - Labels only come from closed sets (channel, priority, outcome, route pattern, standard HTTP method or `OTHER`), never IDs or raw paths.
   - Prometheus discovers every worker replica through DNS, and ships with
     [alert rules](deploy/prometheus/alerts.yml) for queue lag, failure rate, an open breaker and
     unreadable queue stats.

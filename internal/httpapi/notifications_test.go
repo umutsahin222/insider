@@ -258,6 +258,9 @@ func TestMetrics(t *testing.T) {
 		`{"items":[{"channel":"push","recipient":"tok","content":"a","priority":"low"},{"channel":"push","recipient":"tok","content":"b","priority":"low"}]}`)
 	do(t, h, http.MethodGet, "/v1/notifications/"+created.ID.String(), "")
 	do(t, h, http.MethodGet, "/nope", "")
+	for _, m := range []string{"FOO1", "FOO2", "PROPFIND"} { // any token is a valid method to net/http
+		do(t, h, m, "/v1/notifications", "")
+	}
 	if rec := do(t, h, http.MethodGet, "/metrics", ""); rec.Code != http.StatusOK || rec.Body.String() != "# metrics" {
 		t.Errorf("/metrics = %d %q", rec.Code, rec.Body)
 	}
@@ -271,6 +274,9 @@ func TestMetrics(t *testing.T) {
 		"POST /v1/notifications/batch 201",
 		"GET /v1/notifications/{id} 200", // the pattern, never the raw ID
 		"GET unmatched 404",
+		"OTHER unmatched 405", // arbitrary methods collapse into one series
+		"OTHER unmatched 405",
+		"OTHER unmatched 405",
 		"GET /metrics 200",
 	}
 	if strings.Join(m.requests, "|") != strings.Join(want, "|") {

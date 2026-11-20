@@ -17,7 +17,7 @@ worker.
   consumer-defined interfaces (`httpapi.Metrics`, `delivery.Metrics`) with no-op defaults, so the
   business packages never import Prometheus.
 - **API** (`/metrics`): `http_requests_total{method,route,status}`,
-  `http_request_duration_seconds{method,route}` — labelled by **route pattern**, never raw path —
+  `http_request_duration_seconds{method,route}` — labelled by **route pattern**, never raw path, and by a normalised method (standard methods, anything else `OTHER`: net/http accepts any token as a method, found by the hardened architecture-auditor) —
   and `notifications_accepted_total{channel,priority}` (replays excluded).
 - **Worker** (`/metrics` on its own `HTTP_ADDR`, default `:9091`, with `/healthz` and `/readyz`):
   `notification_deliveries_total{channel,outcome,result}` (provider outcome × resulting state:

@@ -173,7 +173,7 @@ func NewRouter(d Deps) http.Handler {
 	return otelhttp.NewHandler(r, "http.server",
 		otelhttp.WithTracerProvider(tracing.Provider),
 		otelhttp.WithPropagators(tracing.Propagator),
-		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return r.Method }),
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return knownMethod(r.Method) }),
 		otelhttp.WithFilter(func(r *http.Request) bool {
 			switch r.URL.Path {
 			case "/healthz", "/readyz", "/metrics", "/openapi.yaml", "/docs":

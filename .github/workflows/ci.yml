@@ -22,7 +22,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: go vet
-        run: go vet ./... && go vet -tags integration ./...
+        run: go vet ./... && go vet -tags integration ./... && go vet -tags acceptance ./test/...
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -45,14 +45,19 @@ jobs:
         run: make test
 
   e2e:
-    name: End-to-end (docker compose + smoke test)
+    name: End-to-end (compose, smoke, acceptance)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
       - name: Start the stack
         run: docker compose up --build -d --wait --wait-timeout 300
       - name: Smoke test
         run: make smoke
+      - name: Acceptance suite (one test per requirement)
+        run: make acceptance
       - name: Scale workers and re-run
         run: |
           docker compose up -d --scale worker=3 --wait --wait-timeout 120

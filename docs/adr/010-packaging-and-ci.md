@@ -28,9 +28,18 @@ observability tools from ADR-007.
   300 SMS, and the mock's busiest second must stay within 100; templates, idempotent replay,
   validation, a 30-item mixed batch until all are sent, stats, metrics, Prometheus scraping every
   worker). It needs only bash, curl and grep, and runs locally (`make smoke`) and in CI.
-- **CI (GitHub Actions)** runs three parallel jobs: lint (go vet incl. the integration build tag,
-  golangci-lint, OpenAPI via Redocly), tests (`make test`: unit + integration with
-  testcontainers, `-race`), and e2e (compose up, smoke test, scale to three workers, smoke again).
+- **`test/acceptance`** (`make acceptance`, build tag `acceptance`) checks the running stack
+  against the assessment specification, one test per requirement. `requirements.md` maps each
+  requirement to its tests. The suite is black-box on purpose: public API, mock provider
+  `/stats`, Prometheus, Jaeger and `docker compose logs`, with no database access. So it needs
+  no extra published ports, and it tests what a client can observe. The rate limit, for
+  example, is measured where the provider receives requests.
+- **CI (GitHub Actions)** runs three parallel jobs:
+  - lint: go vet incl. the integration build tag, golangci-lint, OpenAPI via Redocly, and the
+    Claude Code hook tests;
+  - tests: `make test`, unit + integration with testcontainers, `-race`;
+  - e2e: compose up, smoke test, the acceptance suite, then scale to three workers and smoke
+    again.
 
 ## Consequences
 - + The stack a reviewer starts is the stack CI tests, including multi-replica workers.

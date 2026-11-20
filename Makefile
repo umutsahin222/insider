@@ -1,4 +1,4 @@
-.PHONY: run up down logs smoke build test test-unit lint lint-api test-hooks git-hooks migrate-up migrate-down tidy
+.PHONY: run up down logs smoke acceptance build test test-unit lint lint-api test-hooks git-hooks migrate-up migrate-down tidy
 
 # Inside the compose network (the migrate service talks to the postgres service).
 COMPOSE_DB_URL ?= postgres://notify:notify@postgres:5432/notify?sslmode=disable
@@ -21,6 +21,11 @@ logs:
 # End-to-end checks against a running stack (make up first).
 smoke:
 	bash scripts/smoke.sh
+
+# Acceptance suite against a running stack (make up first): one test per requirement of the
+# assessment specification, see test/acceptance/requirements.md. About two minutes.
+acceptance:
+	go test -count=1 -tags=acceptance -timeout 15m -v ./test/acceptance/
 
 build:
 	go build -o bin/ ./cmd/...

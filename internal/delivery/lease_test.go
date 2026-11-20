@@ -135,6 +135,52 @@ func TestLoop_LateRowsOfABatchAreReleased(t *testing.T) {
 	}
 }
 
+// The send deadline is fixed when the batch is claimed (the lease starts then), not
+// recomputed per row. With 250 ms of headroom and 150 ms per rate-limit slot after the first,
+// rows start at ~0, ~150 and ~300 ms: the third is past the claim-time deadline and must be
+// released, although a per-row deadline (its start + 250 ms) would have let it through.
+func TestLoop_SendDeadlineIsMeasuredFromTheClaim(t *testing.T) {
+	q := &fakeQueue{}
+	for range 3 {
+		q.pending = append(q.pending, claimed(1, 5))
+	}
+	cfg := testConfig()
+	cfg.SendTimeout = 10 * time.Millisecond
+	cfg.Lease = cfg.SendTimeout + StoreTimeout + 250*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	limiter := limiterFunc(func(ctx context.Context, _ string) error {
+		if calls.Add(1) == 1 {
+			return nil // first slot at once
+		}
+		select {
+		case <-time.After(150 * time.Millisecond):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	m := &recordingMetrics{}
+	w := NewWorker(cfg, Deps{Queue: q, Sender: &scriptedSender{reply: domain.ProviderReply{StatusCode: 202}},
+		Limiter: limiter, Metrics: m, Logger: testLogger()})
+
+	go func() {
+		for len(q.ops()) < 3 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+	}()
+	w.loop(ctx)
+
+	if ops := q.ops(); len(ops) != 3 || ops[0] != "sent" || ops[1] != "sent" || ops[2] != "release" {
+		t.Fatalf("ops = %v, want sent, sent, release (the third row starts after the claim-time deadline)", ops)
+	}
+	if len(m.released) != 1 || m.released[0] != ReleaseLeaseExpiring {
+		t.Errorf("release reasons = %v, want [%s]", m.released, ReleaseLeaseExpiring)
+	}
+}
+
 // gatedSender blocks every send until release is closed.
 type gatedSender struct {
 	started chan struct{}

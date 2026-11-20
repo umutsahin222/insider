@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Git pre-push hook: refuse to push eval/* branches, which hold deliberately broken code for
+# evaluating the Claude Code audit layer (docs/claude-code-toolkit.md) and must stay local.
+# Enable with: make git-hooks   (sets core.hooksPath to scripts/git-hooks)
+#
+# Git passes "<local ref> <local sha> <remote ref> <remote sha>" lines on stdin.
+status=0
+while read -r local_ref _ remote_ref _; do
+  case "$local_ref $remote_ref" in
+  *refs/heads/eval/*)
+    echo "pre-push: refusing to push ${local_ref#refs/heads/} -> ${remote_ref#refs/heads/}: eval/* branches never leave this machine." >&2
+    status=1
+    ;;
+  esac
+done
+exit $status

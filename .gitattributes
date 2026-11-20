@@ -1,2 +1,5 @@
 * text=auto eol=lf
+# Shell scripts must keep LF endings to run in Git Bash and on Linux CI alike.
+*.sh text eol=lf
+scripts/git-hooks/* text eol=lf
 *.pdf binary

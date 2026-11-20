@@ -1,4 +1,4 @@
-.PHONY: run up down logs smoke build test test-unit lint lint-api migrate-up migrate-down tidy
+.PHONY: run up down logs smoke build test test-unit lint lint-api test-hooks git-hooks migrate-up migrate-down tidy
 
 # Inside the compose network (the migrate service talks to the postgres service).
 COMPOSE_DB_URL ?= postgres://notify:notify@postgres:5432/notify?sslmode=disable
@@ -42,6 +42,14 @@ test-unit:
 lint:
 	go vet ./...
 	golangci-lint run ./...
+
+# Tests for the Claude Code hooks (.claude/hooks) and the git pre-push hook; bash only.
+test-hooks:
+	bash scripts/test-hooks.sh
+
+# Use the repository's git hooks (pre-push refuses eval/* branches).
+git-hooks:
+	git config core.hooksPath scripts/git-hooks
 
 # Lint the OpenAPI contract (Docker). MSYS_NO_PATHCONV stops Git Bash rewriting container paths.
 lint-api:

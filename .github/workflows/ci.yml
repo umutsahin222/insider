@@ -29,6 +29,8 @@ jobs:
           version: v2.15.0
       - name: OpenAPI contract
         run: make lint-api
+      - name: Claude Code hooks
+        run: make test-hooks
 
   test:
     name: Tests (unit + integration, -race)

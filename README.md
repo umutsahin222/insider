@@ -12,6 +12,8 @@ WebSocket, Prometheus metrics and OpenTelemetry traces.
 - **Contract:** [`api/openapi.yaml`](api/openapi.yaml) (OpenAPI 3.1, linted in CI).
 - **Decisions:** ten short ADRs in [`docs/adr/`](docs/adr/).
 - **How it was built with Claude Code:** [`docs/ai-workflow.md`](docs/ai-workflow.md).
+- **How Claude Code is kept honest here:** hooks, six auditor subagents with a verifier, and
+  measured results, in [`docs/claude-code-toolkit.md`](docs/claude-code-toolkit.md).
 
 ## Contents
 - [Quick start](#quick-start)
@@ -23,6 +25,7 @@ WebSocket, Prometheus metrics and OpenTelemetry traces.
 - [Configuration](#configuration)
 - [Using webhook.site as the provider](#using-webhooksite-as-the-provider)
 - [Development](#development)
+- [Working on this repository with Claude Code](#working-on-this-repository-with-claude-code)
 - [Project layout](#project-layout)
 - [Limits and next steps](#limits-and-next-steps)
 
@@ -383,8 +386,14 @@ make test-unit    # fast: unit tests only
 make test         # unit + integration (testcontainers: real Postgres and Redis; Docker needed), -race
 make lint         # go vet (also with the integration and acceptance build tags) + golangci-lint
 make lint-api     # OpenAPI contract (Redocly, via Docker)
+make up && make acceptance   # black-box acceptance suite against the stack, one test per requirement
+make test-hooks   # tests for the Claude Code hooks
 make migrate-up   # migrations through the compose migrate service
 ```
+
+The acceptance suite ([`test/acceptance`](test/acceptance)) names every test after the
+requirement it checks; [`requirements.md`](test/acceptance/requirements.md) maps each requirement of
+the assessment specification to its tests and ADRs.
 
 Integration tests cover what unit tests cannot:
 - 10 concurrent claimers over 300 rows with no double claims;
@@ -392,9 +401,37 @@ Integration tests cover what unit tests cannot:
 - idempotent creates with 20 concurrent callers;
 - three rate-limiter instances sharing one limit, with slots spaced exactly 10.1 ms apart;
 - Redis pub/sub fan-out, recovery from a killed Redis connection, and prompt hub shutdown.
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, the full test suite with
-`-race`, and an end-to-end job that starts the compose stack, runs [`scripts/smoke.sh`](scripts/smoke.sh),
-scales to three workers and runs it again.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs three jobs:
+- lint, including the hook tests;
+- the full test suite with `-race`;
+- an end-to-end job: it starts the compose stack, runs [`scripts/smoke.sh`](scripts/smoke.sh) and
+  the acceptance suite, then scales to three workers and runs the smoke test again.
+
+## Working on this repository with Claude Code
+
+The repository ships its own Claude Code setup, described in
+[`docs/claude-code-toolkit.md`](docs/claude-code-toolkit.md):
+
+- **Hooks** ([`.claude/hooks`](.claude/hooks)) enforce the rules that must never break:
+  - no edits to applied migrations;
+  - no force pushes, and every push is approved by the developer;
+  - the contract is updated with any handler change;
+  - every edited Go file is formatted and vetted.
+
+  They are tested in CI (`make test-hooks`).
+- **Scoped `CLAUDE.md` files** in `internal/store/postgres`, `internal/delivery`,
+  `internal/httpapi` and `migrations` give Claude each package's invariants when it works there.
+- **Six read-only subagents** ([`.claude/agents`](.claude/agents)) audit architecture,
+  concurrency, the API contract, documentation claims and test adequacy; a verifier on a stronger
+  model confirms or rejects every finding.
+- **Skills:** `/audit` (all of the above, report in [`docs/audits`](docs/audits)), `/ship`
+  (definition of done), `/spec-check` (acceptance suite mapped to requirements) and `/adr`.
+
+**Measured:**
+- On `main`, `/audit all` found 6 real (minor) contract and documentation issues, all fixed.
+- A hardened re-run found a real bug the first run missed: an unbounded metric label.
+- In a blind evaluation with 8 planted violations and 3 decoys, the layer caught 8/8 with no
+  correctness false alarms ([report](docs/audits/2026-11-20-planted-bug-evaluation.md)).
 
 ## Project layout
 
@@ -418,6 +455,9 @@ internal/
 migrations/        versioned SQL (golang-migrate)
 api/openapi.yaml   API contract
 docs/adr/          architecture decision records
+docs/audits/       every audit run of the Claude Code audit layer, kept
+test/acceptance/   black-box acceptance suite, one test per requirement
+.claude/           Claude Code hooks, subagents and skills (see docs/claude-code-toolkit.md)
 deploy/prometheus/ scrape config and alert rules
 ```
 

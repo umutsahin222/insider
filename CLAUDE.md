@@ -41,9 +41,18 @@ Redis is used for the distributed rate limiter and status-event pub/sub. See `do
 - Record non-obvious decisions as ADRs in `docs/adr/` (short: context, decision, consequences).
 - Before committing: `make lint test-unit` must pass.
 
+## Claude Code toolkit (see docs/claude-code-toolkit.md)
+- Hooks in `.claude/hooks` enforce the hard rules (migrations, pushes, contract drift, gofmt/vet). Do not work around a denial; fix the cause or ask.
+- Package-specific rules live in the `CLAUDE.md` of `internal/store/postgres`, `internal/delivery`, `internal/httpapi` and `migrations`.
+- Audit with `/audit` (diff) or `/audit all`; finish work with `/ship`; check the requirements with `/spec-check`; record decisions with `/adr`.
+- Subagent and skill definitions load at session start: restart Claude Code after changing `.claude/agents` or `.claude/skills`.
+- `eval/*` branches hold deliberately broken code and are never pushed.
+
 ## Commands
 - `make run` – `docker compose up --build` (foreground) · `make up` – background, waits until healthy · `make down`
 - `make smoke` – end-to-end checks against a running stack (`scripts/smoke.sh`)
 - `make test` / `make test-unit` / `make lint` / `make lint-api` (OpenAPI, via Docker)
+- `make acceptance` – acceptance suite against a running stack (one test per requirement, `test/acceptance`)
+- `make test-hooks` – tests for the Claude Code hooks · `make git-hooks` – enable the pre-push hook
 - `make migrate-up` / `make migrate-down` (via the compose `migrate` service)
-- CI: `.github/workflows/ci.yml` (lint, tests, compose e2e); check workflow edits with `actionlint`
+- CI: `.github/workflows/ci.yml` (lint incl. hook tests, tests, compose e2e incl. acceptance) and the optional `claude-audit.yml`; check workflow edits with `actionlint`

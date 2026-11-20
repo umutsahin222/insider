@@ -16,7 +16,9 @@ fix commit or an ADR. At the end, `/code-review` and `/security-review` went ove
 codebase. Claude verified the ten code-review findings one by one and fixed nine; the tenth is a
 documented exception. A final audit then checked every line of the brief against the running
 system. It found two real bugs, a related timeout gap, and three mistakes in Claude's own test
-expectations.
+expectations. Finally, those one-off checks became a repeatable layer: hooks, six auditor
+subagents with a verifier, and skills (section 7, [`claude-code-toolkit.md`](claude-code-toolkit.md)).
+The layer found real issues on `main` and caught 8 of 8 planted violations in a blind evaluation.
 
 ## 1. Setting up the session
 
@@ -151,7 +153,7 @@ review found no high or medium issues. What it checked:
 
 ## 6. Final audit against the brief
 
-After the reviews, the developer asked: "Does it do everything the PDF asks, completely and
+After the reviews, the developer asked: "Does it do everything the assessment specification asks, completely and
 correctly? Is anything missing or wrong?" Claude went through the brief line by line, first in
 the code, then on the running stack. It wrote an acceptance script with one check per requirement
 (69 checks, nearly all of them HTTP calls), plus SQL over `delivery_attempts` to measure rate
@@ -218,7 +220,66 @@ page. What followed:
 - **API docs:** the running API serves its contract at `/openapi.yaml` and renders it with
   Swagger UI at `/docs`.
 
-## 7. Tools Claude installed itself (no admin rights)
+## 7. Making the audit repeatable
+
+The reviews and the final audit had worked, but each had been a one-off run by hand. The
+developer asked for more: the job ad stresses Claude Code skills, and the setup itself should show
+them. Claude proposed a plan in plan mode, and the developer approved it with four corrections:
+- no machine-specific names in the repository;
+- "assessment specification", not the document's file format;
+- scripts that run in both Git Bash and Linux CI;
+- the evaluation branch must never be pushed.
+
+The result is described in [`claude-code-toolkit.md`](claude-code-toolkit.md):
+- hooks that enforce the hard rules, tested in CI;
+- directory-scoped `CLAUDE.md` files;
+- six read-only auditor subagents and a verifier;
+- the `/audit`, `/ship`, `/spec-check` and `/adr` skills;
+- an optional PR workflow;
+- the acceptance run ported to Go, one test per requirement.
+
+Before writing any agent, hook or workflow file, Claude had a subagent check the current
+documentation: frontmatter fields, hook JSON formats, `claude-code-action` inputs.
+
+Then the layer was used and measured, and every run is kept in [`docs/audits/`](audits/):
+
+1. **`/audit all` on `main`** (started by the developer).
+   - Eleven raw findings; the verifier confirmed 6, all minor (undocumented 413/403/426,
+     incomplete `required` lists, the correlation-ID pattern, two documentation claims), and
+     rejected 5 with reasons.
+   - All six were fixed with tests.
+   - For one fix that the auditor could not revert-check, a missing regression test was added.
+     It was mutation-checked: it fails when the deadline is computed per row, while the old test
+     still passes.
+2. **A weak spot, found by reading the run.**
+   - architecture-auditor had "covered" the whole repository in three tool calls. The developer
+     asked to harden it.
+   - It got four mandatory checks and a `checks_executed` coverage contract, which `/audit` now
+     enforces. An empty result without proof of coverage is reported as incomplete, not clean.
+   - The first re-run in the same session still returned the old shape: agent definitions only
+     load at session start, so a restart was needed.
+   - After the restart it took 25 calls instead of 3 and found a real bug the first run had
+     missed. The raw HTTP method was a metric label, giving unbounded series. That was fixed,
+     and its test fails without the fix.
+3. **A blind planted-bug evaluation.**
+   - Eight violations and three decoys went into one innocuous-looking commit on a local branch.
+     The auditors were told nothing about it.
+   - All eight were caught, each by two to four auditors. No decoy drew a correctness alarm. The
+     verifier confirmed all 20 findings and found two bugs nobody had planted.
+   - One decoy drew a true finding (new code without a test). That is recorded as a flaw in the
+     decoy's design, not as an auditor error.
+   - While writing the report, Claude noticed that the hardened agent's prompt contained an
+     example close to one planted violation. It disclosed this in the report as contamination
+     and replaced the example. The violation had been caught by three other auditors anyway.
+
+What this shows about working with Claude Code:
+- Instructions alone produce plausible but shallow work. Coverage has to be **asked for and
+  checked**, as with `checks_executed`.
+- A second, skeptical agent filters over-reporting, and its corrections are worth reading. It
+  lowered six severities and rejected half of one claim.
+- An evaluation is only as honest as its write-up of its own limits.
+
+## 8. Tools Claude installed itself (no admin rights)
 
 | Tool | How |
 |---|---|
@@ -233,7 +294,7 @@ Windows quirks were fixed once and recorded, not rediscovered each time. For exa
 testcontainers reaper needs a Docker socket override, now built into `make test`, and Git Bash
 needs `MSYS_NO_PATHCONV` for docker volume paths.
 
-## 8. Where the developer steered
+## 9. Where the developer steered
 
 - **Decisions:** storage and queue technology, scope (all bonuses), and the language rule: code
   and docs in English, conversation in Turkish.
@@ -245,7 +306,7 @@ needs `MSYS_NO_PATHCONV` for docker volume paths.
 - **Gates:** every push, and choosing the "right way" when it mattered ("should we install gh? do
   it however is most correct").
 
-## 9. What did not go smoothly
+## 10. What did not go smoothly
 
 - **Shell quoting:** Python patch scripts embedded in Bash heredocs sometimes failed to parse.
   Claude switched to patch scripts written to a scratch folder, applied by a helper that requires

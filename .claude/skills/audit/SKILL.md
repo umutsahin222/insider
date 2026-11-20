@@ -1,7 +1,7 @@
 ---
 name: audit
 description: Run the repository's audit layer. Five read-only auditor subagents run in parallel (architecture, concurrency, contract, claims, test adequacy), their findings are de-duplicated and re-checked by finding-verifier, and a report of the confirmed findings is written to docs/audits/. Never changes code.
-argument-hint: "[diff | all | <path>]  (default: diff against origin/main)"
+argument-hint: "[diff | all | <git range> | <path>]  (default: diff against origin/main)"
 disable-model-invocation: true
 allowed-tools: Read, Grep, Glob, Bash(git diff:*), Bash(git log:*), Bash(git rev-parse:*), Bash(git status:*)
 ---
@@ -19,6 +19,8 @@ filters, you assemble. **Do not modify any source file.** The only file you writ
 - **Empty or `diff`:** the range is `origin/main...HEAD`, plus uncommitted changes
   (`git diff HEAD`). If both are empty, say so and suggest `/audit all`; stop.
 - **`all`:** the whole repository.
+- **A git range** (contains `..`, e.g. `origin/main...HEAD`, as passed by the `claude-audit` CI
+  workflow): diff mode over that range.
 - **Anything else:** treat it as a path (file or directory) and audit only that.
 
 Collect the changed or in-scope files (`git diff --name-only …`) so every auditor receives the

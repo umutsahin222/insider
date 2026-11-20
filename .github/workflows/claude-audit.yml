@@ -1,0 +1,68 @@
+name: claude-audit
+
+# Runs the repository's Claude Code audit layer (/audit: five auditor subagents and a verifier,
+# see docs/claude-code-toolkit.md) on every pull request and posts the confirmed findings as a
+# comment. Optional: without an ANTHROPIC_API_KEY secret the audit job is skipped and nothing
+# fails. Fork pull requests never receive secrets, so they are skipped too.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-audit-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Is the Claude audit configured?
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.key.outputs.enabled }}
+    steps:
+      - id: key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ANTHROPIC_API_KEY is not set; the Claude audit is skipped."
+          fi
+
+  audit:
+    name: Claude audit (/audit diff)
+    needs: check
+    if: needs.check.outputs.enabled == 'true' && github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the audit diffs against the base branch
+      - uses: actions/setup-go@v6 # auditors run go list / go vet / go test
+        with:
+          go-version-file: go.mod
+      - uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: |
+            /audit origin/${{ github.base_ref }}...HEAD
+
+            This runs in CI for pull request #${{ github.event.pull_request.number }}. When the
+            report is written, post it as one pull request comment:
+            gh pr comment ${{ github.event.pull_request.number }} --body-file <report path>
+            Do not change, commit or push any file other than the report.
+          claude_args: >-
+            --max-turns 80
+            --allowedTools "Bash(gh pr comment:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git worktree:*),Bash(go list:*),Bash(go vet:*),Bash(go test:*),Bash(make lint-api)"

@@ -77,7 +77,7 @@ Evidence: the number of metrics, label names and call sites traced.
 Read **every non-test `.go` file** in `internal/httpapi` and `internal/store/postgres`.
 - In handlers, the job is parse → call domain/store → encode. Flag:
   - status-transition decisions;
-  - eligibility rules (e.g. "can be cancelled if…");
+  - eligibility rules (deciding from the current state whether an operation is allowed);
   - retry or scheduling policy;
   - validation beyond parsing and type checks;
   - read-then-write sequences that decide on the read.
@@ -102,12 +102,12 @@ must always hold all four checks:
   "scope": "all",
   "checks_executed": [
     {"check": "dependency-direction", "method": "go list -f ... ./internal/... ./cmd/... ./api/...", "evidence": "17 packages; 23 internal edges checked; domain has 0 internal imports", "result": "pass"},
-    {"check": "global-state-scan", "method": "grep over 52 non-test files", "evidence": "prometheus globals 0, otel globals 0, slog globals 0, fmt/log 2 (cmd/mockprovider, cmd/healthcheck: tooling), os.Getenv 4 (config, tooling), package vars 11 opened: all sentinels/regexps/scripts", "result": "pass"},
+    {"check": "global-state-scan", "method": "grep over 52 non-test files", "evidence": "prometheus globals 0, otel globals 0, slog globals 0, fmt/log 2 (cmd/mockprovider, cmd/healthcheck: tooling), os.Getenv 5 (config 2, tooling 2, internal/delivery/worker.go 1 → ARCH-1), package vars 11 opened: all sentinels/regexps/scripts", "result": "fail: see ARCH-1"},
     {"check": "metric-label-cardinality", "method": "read internal/metrics/metrics.go; traced call sites", "evidence": "11 metrics, 9 label names, 14 call sites traced; route label = chi RoutePattern()", "result": "pass"},
-    {"check": "business-rule-leakage", "method": "read every non-test file", "evidence": "internal/httpapi: 9 files, internal/store/postgres: 5 files", "result": "fail: see ARCH-1"}
+    {"check": "business-rule-leakage", "method": "read every non-test file", "evidence": "internal/httpapi: 9 files, internal/store/postgres: 5 files", "result": "pass"}
   ],
   "findings": [
-    {"id":"ARCH-1","agent":"architecture-auditor","rule":"CLAUDE.md: business rules live in internal/domain or internal/delivery, never in handlers","file":"internal/httpapi/notifications.go","line":245,"severity":"medium","evidence":"cancelNotification reads the notification and refuses when scheduled_at is within 5 s: an eligibility rule decided in the handler from a read","failure_scenario":"The rule is untested by domain tests, bypassed by CancelBatch, and races with the conditional UPDATE it precedes."}
+    {"id":"ARCH-1","agent":"architecture-auditor","rule":"CLAUDE.md: config only via environment variables through internal/config","file":"internal/delivery/worker.go","line":120,"severity":"medium","evidence":"worker reads os.Getenv(\"WORKER_DEBUG\") directly instead of receiving the value through delivery.Config","failure_scenario":"The setting is invisible to config validation and to the documented variable list, and tests cannot set it without mutating the process environment."}
   ]
 }
 ```

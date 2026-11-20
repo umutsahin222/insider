@@ -207,3 +207,37 @@ func TestWS_RejectsBadRequestsBeforeUpgrading(t *testing.T) {
 		}
 	}
 }
+
+// The handshake rejections documented for GET /v1/ws in api/openapi.yaml.
+func TestWS_HandshakeRejections(t *testing.T) {
+	srv, _, _ := wsServer(t)
+	id := decode[notificationResponse](t, do(t, srv.Config.Handler, http.MethodPost, "/v1/notifications", validBody)).ID
+	url := srv.URL + "/v1/ws?notification_id=" + id.String()
+
+	// A browser from another origin (not in WS_ALLOWED_ORIGINS): 403.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, resp, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(url, "http"), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": []string{"https://evil.example"}},
+	})
+	if err == nil || resp == nil || resp.StatusCode != http.StatusForbidden {
+		t.Errorf("foreign origin: err=%v status=%v, want 403", err, statusOf(resp))
+	}
+
+	// A plain GET without the upgrade headers: 426.
+	plain, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = plain.Body.Close()
+	if plain.StatusCode != http.StatusUpgradeRequired {
+		t.Errorf("plain GET: status %d, want 426", plain.StatusCode)
+	}
+}
+
+func statusOf(r *http.Response) any {
+	if r == nil {
+		return nil
+	}
+	return r.StatusCode
+}

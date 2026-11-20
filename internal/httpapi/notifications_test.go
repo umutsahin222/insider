@@ -673,3 +673,21 @@ func TestEvents_CancelAndRetryArePublished(t *testing.T) {
 		t.Errorf("first event is for %s, want %s", ev.evs[0].NotificationID, created.ID)
 	}
 }
+
+// Every Notification property is required in api/openapi.yaml (nullable ones are null when
+// unset), so the response must always carry all of them.
+func TestNotificationResponse_AlwaysHasEveryContractField(t *testing.T) {
+	h := NewRouter(testDeps(newFakeStore(), nil))
+	rec := do(t, h, http.MethodPost, "/v1/notifications", validBody)
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"id", "batch_id", "idempotency_key", "channel", "recipient", "content", "template_id",
+		"priority", "status", "scheduled_at", "next_attempt_at", "attempts", "max_attempts", "last_error",
+		"provider_message_id", "correlation_id", "created_at", "updated_at", "sent_at"} {
+		if _, ok := got[f]; !ok {
+			t.Errorf("response has no %q; the contract makes it required", f)
+		}
+	}
+}

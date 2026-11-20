@@ -71,6 +71,7 @@ paths:
             Location:
               schema: { type: string }
               description: URL of the created notification.
+            X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Notification' }
@@ -79,6 +80,7 @@ paths:
           headers:
             Idempotent-Replayed:
               schema: { type: string, enum: ['true'] }
+            X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Notification' }
@@ -152,6 +154,7 @@ paths:
             Location:
               schema: { type: string }
               description: URL of the batch summary.
+            X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/BatchCreated' }
@@ -163,6 +166,7 @@ paths:
             Location:
               schema: { type: string }
               description: URL of the batch summary.
+            X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
           content:
             application/json:
               schema: { $ref: '#/components/schemas/BatchCreated' }
@@ -309,6 +313,7 @@ paths:
               schema: { $ref: '#/components/schemas/Template' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '409': { $ref: '#/components/responses/Conflict' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
         '422': { $ref: '#/components/responses/ValidationFailed' }
     get:
       tags: [templates]
@@ -362,8 +367,30 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/StatusEvent' }
-        '400': { $ref: '#/components/responses/BadRequest' }
+        '400':
+          description: |
+            Invalid query parameters (problem+json, as `BadRequest`), or an invalid WebSocket
+            handshake such as a bad `Sec-WebSocket-Version` or `Sec-WebSocket-Key` (plain text,
+            written by the WebSocket library).
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+            text/plain:
+              schema: { type: string }
+        '403':
+          description: |
+            The browser's `Origin` is not allowed. Same-origin and non-browser clients are always
+            allowed; other origins must be listed in `WS_ALLOWED_ORIGINS`. Plain text, written by
+            the WebSocket library during the handshake.
+          content:
+            text/plain:
+              schema: { type: string }
         '404': { $ref: '#/components/responses/NotFound' }
+        '426':
+          description: 'Not a WebSocket upgrade request (missing `Connection: Upgrade` / `Upgrade: websocket`). Plain text.'
+          content:
+            text/plain:
+              schema: { type: string }
 
   /healthz:
     get:
@@ -470,26 +497,46 @@ components:
       name: X-Correlation-ID
       in: header
       required: false
-      schema: { type: string, maxLength: 128 }
+      description: |
+        Stored with the notification, written to every log line and forwarded to the provider.
+        A missing value, or one that does not match the pattern, is **replaced** by a generated
+        UUID (not rejected); the value actually used is returned in the `X-Correlation-ID`
+        response header.
+      schema: { type: string, pattern: '^[A-Za-z0-9._:-]{1,128}$' }
+
+  headers:
+    CorrelationID:
+      description: |
+        The correlation ID used for this request: the client's `X-Correlation-ID` if it matched
+        `^[A-Za-z0-9._:-]{1,128}$`, otherwise a generated UUID. Set on every response.
+      schema: { type: string }
 
   responses:
     BadRequest:
       description: Malformed request (invalid JSON, bad query parameter).
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     PayloadTooLarge:
       description: Request body exceeds the limit (1 MiB single, 16 MiB batch).
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     NotFound:
       description: Resource not found (also returned for malformed IDs).
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     Conflict:
       description: The resource is not in a state that allows this operation, or a uniqueness constraint was violated.
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -498,11 +545,15 @@ components:
         Semantically invalid input (`errors` lists every invalid field), or the
         `Idempotency-Key` was already used with a different request body
         (title "Idempotency key reused").
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
     ValidationFailed:
       description: Semantically invalid input; `errors` lists every invalid field.
+      headers:
+        X-Correlation-ID: { $ref: '#/components/headers/CorrelationID' }
       content:
         application/problem+json:
           schema: { $ref: '#/components/schemas/Problem' }
@@ -623,6 +674,8 @@ components:
                     description: How long the oldest due notification has waited (queue lag).
                   by_priority:
                     type: object
+                    description: Every priority is present (zeros if empty).
+                    required: [high, normal, low]
                     properties:
                       high: { $ref: '#/components/schemas/QueueCounts' }
                       normal: { $ref: '#/components/schemas/QueueCounts' }
@@ -669,7 +722,8 @@ components:
         total: { type: integer }
         counts:
           type: object
-          description: Number of notifications per status.
+          description: Number of notifications per status; every status is present (0 if none).
+          required: [pending, processing, sent, failed, cancelled]
           properties:
             pending: { type: integer }
             processing: { type: integer }
@@ -679,7 +733,10 @@ components:
 
     Notification:
       type: object
-      required: [id, channel, recipient, content, priority, status, attempts, max_attempts, next_attempt_at, created_at, updated_at]
+      description: Every property is always present; nullable ones are `null` when unset.
+      required: [id, batch_id, idempotency_key, channel, recipient, content, template_id, priority, status,
+        scheduled_at, next_attempt_at, attempts, max_attempts, last_error, provider_message_id,
+        correlation_id, created_at, updated_at, sent_at]
       properties:
         id: { type: string, format: uuid }
         batch_id: { type: [string, 'null'], format: uuid }
@@ -703,7 +760,7 @@ components:
 
     DeliveryAttempt:
       type: object
-      required: [attempt, outcome, duration_ms, created_at]
+      required: [attempt, outcome, status_code, error, duration_ms, created_at]
       properties:
         attempt: { type: integer }
         outcome:

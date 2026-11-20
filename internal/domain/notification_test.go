@@ -44,6 +44,8 @@ func TestNewNotification_Validation(t *testing.T) {
 		{"valid push", func(in *CreateInput) { in.Channel, in.Recipient = "push", "fcm:abc123_-:XYZ" }, nil},
 		{"unknown channel", func(in *CreateInput) { in.Channel = "fax" }, []string{"channel"}},
 		{"missing channel", func(in *CreateInput) { in.Channel = "" }, []string{"channel"}},
+		{"empty request names every required field", func(in *CreateInput) { *in = CreateInput{} }, []string{"channel", "recipient", "content"}},
+		{"unknown channel still reports missing content", func(in *CreateInput) { in.Channel, in.Content = "fax", "" }, []string{"channel", "content"}},
 		{"missing recipient", func(in *CreateInput) { in.Recipient = "  " }, []string{"recipient"}},
 		{"sms without plus", func(in *CreateInput) { in.Recipient = "905551234567" }, []string{"recipient"}},
 		{"sms too short", func(in *CreateInput) { in.Recipient = "+9055" }, []string{"recipient"}},

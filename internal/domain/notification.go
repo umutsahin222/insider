@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"text/template"
 	"time"
 
@@ -185,6 +186,14 @@ func build(in CreateInput, rules Rules, now time.Time, prefix string, ve *Valida
 	ch, err := ParseChannel(in.Channel)
 	if err != nil {
 		ve.add(prefix+"channel", "must be one of sms, email, push")
+		// Recipient and content formats depend on the channel, but missing fields do not:
+		// report them now rather than one round trip later.
+		if strings.TrimSpace(in.Recipient) == "" {
+			ve.add(prefix+"recipient", "is required")
+		}
+		if in.Template == nil && strings.TrimSpace(in.Content) == "" {
+			ve.add(prefix+"content", "is required")
+		}
 	} else {
 		n.Channel = ch
 		rules.validateRecipient(ch, in.Recipient, prefix, ve)

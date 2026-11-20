@@ -50,7 +50,7 @@ type Metrics interface {
 	// Delivered is called when a notification is sent, with the time since it became due
 	// (created, or its scheduled time), including queueing and earlier attempts.
 	Delivered(ch domain.Channel, sinceDue time.Duration)
-	// RateLimitWaited reports how long a send waited for a rate-limit token.
+	// RateLimitWaited reports how long a send waited for its rate-limit slot.
 	RateLimitWaited(ch domain.Channel, d time.Duration)
 	// Released counts claimed work handed back to the queue.
 	Released(ch domain.Channel, reason ReleaseReason)

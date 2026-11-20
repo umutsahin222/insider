@@ -1,90 +1,120 @@
-// Package ratelimit implements a distributed token bucket on Redis (ADR-003).
+// Package ratelimit implements a distributed rate limiter on Redis (ADR-003): GCRA with slot
+// reservation, shared by every worker replica.
 package ratelimit
 
 import (
 	"context"
 	"fmt"
-	"math/rand/v2"
+	"math"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
-// tokenBucket refills `rate` tokens per second up to `burst` and takes one token if available.
-// It uses the Redis server clock (TIME), so all worker replicas share one notion of time.
-// Returns {allowed (1|0), wait_ms until a token is available}.
-var tokenBucket = redis.NewScript(`
-local key   = KEYS[1]
-local rate  = tonumber(ARGV[1])
-local burst = tonumber(ARGV[2])
+// reserveSlot books the next send slot for a key (GCRA, the generic cell rate algorithm).
+//
+// The key holds the theoretical arrival time (TAT): the earliest moment the next slot may
+// start. A caller gets slot = max(TAT, now - tolerance), and TAT moves to slot + interval, so
+// consecutive slots are at least one interval apart however many callers race for them.
+// Callers sleep until their slot instead of polling, so no capacity is lost to late wake-ups:
+// under continuous demand slots are back to back and the full rate is used.
+//
+// With tolerance 0 (burst 1) no 1-second window ever holds more than rate slots; a tolerance of
+// (burst-1) intervals lets that many extra requests through at once after an idle period.
+// A slot more than max_wait away is not booked at all, so a caller that could not use it (its
+// deadline would pass first) does not take capacity from others.
+//
+// Times are integer microseconds on the Redis server clock (TIME), so replicas never disagree
+// about elapsed time. Returns {booked (1|0), wait_us until the slot starts}.
+var reserveSlot = redis.NewScript(`
+local interval  = tonumber(ARGV[1])
+local tolerance = tonumber(ARGV[2])
+local max_wait  = tonumber(ARGV[3])
 
 local t   = redis.call('TIME')
-local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local now = tonumber(t[1]) * 1000000 + tonumber(t[2])
 
-local state  = redis.call('HMGET', key, 'tokens', 'ts')
-local tokens = tonumber(state[1])
-local ts     = tonumber(state[2])
-if tokens == nil then
-  tokens = burst
-  ts = now
+local tat  = tonumber(redis.call('GET', KEYS[1])) or 0
+local slot = math.max(tat, now - tolerance)
+local wait = math.max(0, slot - now)
+if wait > max_wait then
+  return {0, wait}
 end
 
-tokens = math.min(burst, tokens + math.max(0, now - ts) * rate / 1000)
-
-local allowed = 0
-local wait = 0
-if tokens >= 1 then
-  tokens = tokens - 1
-  allowed = 1
-else
-  wait = math.ceil((1 - tokens) * 1000 / rate)
-end
-
-redis.call('HSET', key, 'tokens', tokens, 'ts', now)
-redis.call('PEXPIRE', key, math.ceil(burst * 1000 / rate) + 1000)
-return {allowed, wait}
+local next_tat = slot + interval
+redis.call('SET', KEYS[1], string.format('%.0f', next_tat), 'PX', math.ceil((next_tat - now) / 1000) + 1000)
+return {1, wait}
 `)
 
-// Limiter is a per-key token bucket shared by every process using the same Redis.
+const (
+	// maxReservation bounds how far ahead Wait books a slot when ctx has no deadline.
+	maxReservation = time.Minute
+	// jitterAllowance stretches each second's worth of slots by this much. Slots are exact on
+	// the Redis clock, but a send reaches the provider a little after its slot (timer wake-up,
+	// scheduling, network), and that delay varies. With 100 slots exactly 10 ms apart, slot 0
+	// and slot 100 are exactly 1 s apart, so a slightly late slot 0 already puts 101 requests
+	// inside one second at the provider. Spacing slots (1 s + 10 ms) / rate apart keeps any
+	// second at the provider within the limit for delays varying by up to 10 ms, for 1 % of
+	// throughput (99/s at a limit of 100).
+	jitterAllowance = 10 * time.Millisecond
+)
+
+// Limiter spaces events per key across every process that shares the same Redis.
 type Limiter struct {
-	rdb   redis.Scripter
-	rate  float64
-	burst int
+	rdb       redis.Scripter
+	interval  int64 // microseconds between slots
+	tolerance int64 // microseconds a slot may lag behind now: (burst-1) intervals
 }
 
-// New returns a limiter allowing rate events per second with the given burst.
+// New returns a limiter allowing at most rate events in any second; burst > 1 lets that many
+// through at once after an idle period (each extra one adds to the most a second can hold).
 func New(rdb redis.Scripter, rate float64, burst int) *Limiter {
-	return &Limiter{rdb: rdb, rate: rate, burst: burst}
+	interval := int64(math.Ceil(float64((time.Second + jitterAllowance).Microseconds()) / rate))
+	return &Limiter{rdb: rdb, interval: interval, tolerance: int64(max(burst-1, 0)) * interval}
 }
 
-// Allow tries to take a token for key. If denied, it returns how long until one is available.
-func (l *Limiter) Allow(ctx context.Context, key string) (bool, time.Duration, error) {
-	res, err := tokenBucket.Run(ctx, l.rdb, []string{"ratelimit:" + key}, l.rate, l.burst).Int64Slice()
+// Reserve books the next slot for key unless it starts more than maxWait from now. It returns
+// whether a slot was booked and how long until it starts (the caller must not act before).
+func (l *Limiter) Reserve(ctx context.Context, key string, maxWait time.Duration) (bool, time.Duration, error) {
+	res, err := reserveSlot.Run(ctx, l.rdb, []string{"ratelimit:" + key},
+		l.interval, l.tolerance, max(maxWait.Microseconds(), 0)).Int64Slice()
 	if err != nil {
-		return false, 0, fmt.Errorf("running token bucket: %w", err)
+		return false, 0, fmt.Errorf("reserving rate-limit slot: %w", err)
 	}
-	return res[0] == 1, time.Duration(res[1]) * time.Millisecond, nil
+	return res[0] == 1, time.Duration(res[1]) * time.Microsecond, nil
 }
 
-// Wait blocks until a token for key is taken or ctx is done. Redis errors are returned
-// immediately: the caller decides how to back off (fail closed, see ADR-003).
+// Allow books a slot only if one is available right now.
+func (l *Limiter) Allow(ctx context.Context, key string) (bool, time.Duration, error) {
+	return l.Reserve(ctx, key, 0)
+}
+
+// Wait books the next slot for key and sleeps until it starts. If the slot would start after
+// ctx's deadline, nothing is booked and the error wraps context.DeadlineExceeded at once, so
+// the caller can give the work back instead of waiting in vain. Redis errors are returned
+// immediately: the caller decides how to back off (fail closed, see ADR-003). A slot booked
+// by a caller whose ctx is cancelled while it sleeps goes unused.
 func (l *Limiter) Wait(ctx context.Context, key string) error {
-	for {
-		ok, wait, err := l.Allow(ctx, key)
-		if err != nil {
-			return err
-		}
-		if ok {
-			return nil
-		}
-		// Small jitter so waiters on many replicas don't retry in lockstep.
-		wait += time.Duration(rand.Int64N(int64(2 * time.Millisecond)))
-		t := time.NewTimer(wait)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return ctx.Err()
-		case <-t.C:
-		}
+	maxWait := maxReservation
+	if deadline, ok := ctx.Deadline(); ok {
+		maxWait = min(maxWait, time.Until(deadline))
+	}
+	booked, wait, err := l.Reserve(ctx, key, maxWait)
+	if err != nil {
+		return err
+	}
+	if !booked {
+		return fmt.Errorf("next rate-limit slot for %s is %s away: %w", key, wait.Round(time.Millisecond), context.DeadlineExceeded)
+	}
+	if wait <= 0 {
+		return nil
+	}
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
 }

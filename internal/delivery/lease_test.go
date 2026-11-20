@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -58,6 +59,27 @@ func TestDeliver_ReleasesWhenTheLeaseWouldExpireWhileWaiting(t *testing.T) {
 	}
 	if q.calls[0].delay != 0 {
 		t.Errorf("release delay = %v, want 0 (due again at once)", q.calls[0].delay)
+	}
+	if len(m.released) != 1 || m.released[0] != ReleaseLeaseExpiring {
+		t.Errorf("release reasons = %v, want [%s]", m.released, ReleaseLeaseExpiring)
+	}
+}
+
+// The limiter refuses at once when its next slot starts after the deadline (it books nothing):
+// that is a lease about to run out, not a broken limiter.
+func TestDeliver_LimiterSlotPastDeadlineReleasesAsLeaseExpiring(t *testing.T) {
+	q := &fakeQueue{}
+	s := &scriptedSender{reply: domain.ProviderReply{StatusCode: 202}}
+	tooLate := limiterFunc(func(context.Context, string) error {
+		return fmt.Errorf("next rate-limit slot is 3s away: %w", context.DeadlineExceeded)
+	})
+	m := &recordingMetrics{}
+	w := newMeteredTestWorker(q, s, tooLate, m)
+
+	w.deliver(context.Background(), claimed(1, 5), time.Now().Add(time.Second))
+
+	if ops := q.ops(); len(ops) != 1 || ops[0] != "release" || s.sent != 0 || q.calls[0].delay != 0 {
+		t.Fatalf("ops = %v, sent = %d; want one immediate release and no send", ops, s.sent)
 	}
 	if len(m.released) != 1 || m.released[0] != ReleaseLeaseExpiring {
 		t.Errorf("release reasons = %v, want [%s]", m.released, ReleaseLeaseExpiring)

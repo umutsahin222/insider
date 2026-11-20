@@ -28,8 +28,8 @@ failure modes remained:
 - **Lease sizing is validated at startup:** `LEASE_DURATION > PROVIDER_TIMEOUT × CLAIM_BATCH_SIZE`,
   and `> PROVIDER_TIMEOUT + 10 s` (the store-write timeout), as a sizing hint.
 - **A worker never starts a send its lease might not cover.** Sizing alone is not enough: the
-  rows of a claimed batch wait for rate-limit tokens one after another, and with many replicas
-  sharing a 100/s bucket (or a low `RATE_LIMIT_PER_SECOND`) a late row can wait past its lease,
+  rows of a claimed batch wait for rate-limit slots one after another, and with many replicas
+  sharing a 100/s limit (or a low `RATE_LIMIT_PER_SECOND`) a late row can wait past its lease,
   be reaped and claimed elsewhere, and then be sent by both workers. Found by the phase 7 code
   review. Each row therefore has a send deadline, `claim time + lease − send timeout − store
   timeout`, measured on the worker's monotonic clock from just *before* the claim (so it is never

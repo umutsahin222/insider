@@ -113,7 +113,7 @@ func NewDeliveryMetrics(reg prometheus.Registerer) *DeliveryMetrics {
 		}, []string{"channel"}),
 		rateWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "notification_rate_limit_wait_seconds",
-			Help:    "Time a send waited for a rate-limit token.",
+			Help:    "Time a send waited for its rate-limit slot.",
 			Buckets: []float64{.001, .005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 		}, []string{"channel"}),
 		releases: prometheus.NewCounterVec(prometheus.CounterOpts{

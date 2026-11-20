@@ -87,8 +87,8 @@ type Worker struct {
 	log        *slog.Logger
 	breaker    *gobreaker.CircuitBreaker[domain.ProviderReply]
 	randN      func(int64) int64
-	// probing is set while this process's single half-open probe is between taking a
-	// rate-limit token and finishing its send; other loops release instead of taking tokens.
+	// probing is set while this process's single half-open probe is between booking a
+	// rate-limit slot and finishing its send; other loops release instead of booking slots.
 	probing atomic.Bool
 }
 
@@ -200,7 +200,7 @@ func (w *Worker) loop(ctx context.Context) {
 // sendDeadline is the latest moment a row claimed at claimedAt may start its provider call:
 // the send and the write that records it must both finish before the lease expires, or the
 // reaper may already have handed the row to another worker (a duplicate send). Rows of a
-// batch wait for rate-limit tokens one after another, so late rows can reach it.
+// batch wait for rate-limit slots one after another, so late rows can reach it.
 func (w *Worker) sendDeadline(claimedAt time.Time) time.Time {
 	return claimedAt.Add(w.cfg.Lease - w.cfg.SendTimeout - StoreTimeout)
 }
@@ -236,13 +236,13 @@ func (w *Worker) deliver(ctx context.Context, n domain.Notification, sendBy time
 	w.events.Publish(ctx, n.Transitioned(domain.StatusProcessing, nil, time.Now()))
 
 	// The breaker may have opened while this claimed batch was being worked through: hand the
-	// rest back before taking a rate-limit token that another replica could have used.
+	// rest back before booking a rate-limit slot that another replica could have used.
 	switch w.breaker.State() {
 	case gobreaker.StateOpen:
 		w.release(ctx, n, w.cfg.Breaker.OpenTimeout, ReleaseBreakerOpen)
 		return
 	case gobreaker.StateHalfOpen:
-		// The breaker admits one probe; only the loop that will make it takes a token.
+		// The breaker admits one probe; only the loop that will make it books a slot.
 		if !w.probing.CompareAndSwap(false, true) {
 			w.release(ctx, n, w.cfg.PollInterval, ReleaseBreakerHalfOpen)
 			return
@@ -264,8 +264,9 @@ func (w *Worker) deliver(ctx context.Context, n domain.Notification, sendBy time
 		switch {
 		case ctx.Err() != nil:
 			w.release(ctx, n, 0, ReleaseShuttingDown)
-		case waitCtx.Err() != nil:
-			// Waited so long for a token that the lease could expire mid-send: hand it back.
+		case waitCtx.Err() != nil || errors.Is(err, context.DeadlineExceeded):
+			// The next rate-limit slot comes too late: the lease could expire mid-send (the
+			// limiter says so up front instead of waiting). Hand the row back.
 			w.release(ctx, n, 0, ReleaseLeaseExpiring)
 		default:
 			// Fail closed: without the shared limiter we cannot prove we're under the provider limit.

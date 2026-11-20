@@ -57,8 +57,8 @@ func TestAllow_BurstThenDeny(t *testing.T) {
 	if err != nil || ok {
 		t.Fatalf("4th token: ok=%v err=%v, want denied", ok, err)
 	}
-	if wait <= 0 || wait > 100*time.Millisecond {
-		t.Errorf("wait = %v, want (0, 100ms] at 10/s", wait)
+	if interval := time.Duration(l.interval) * time.Microsecond; wait <= 0 || wait > interval {
+		t.Errorf("wait = %v, want (0, %v] at 10/s", wait, interval)
 	}
 }
 
@@ -117,7 +117,7 @@ func TestReserve_SlotsAreSpacedByTheInterval(t *testing.T) {
 
 // A slot further away than the caller can wait is not booked, so it stays available.
 func TestReserve_TooFarIsNotBooked(t *testing.T) {
-	l := New(rdb, 10, 1) // 100 ms slots
+	l := New(rdb, 10, 1) // 101 ms slots: 100 ms plus the jitter allowance
 	ctx := context.Background()
 	key := t.Name()
 	if booked, _, _ := l.Reserve(ctx, key, 0); !booked {
@@ -130,8 +130,8 @@ func TestReserve_TooFarIsNotBooked(t *testing.T) {
 		}
 	}
 	booked, wait, err := l.Reserve(ctx, key, time.Second)
-	if err != nil || !booked || wait > 100*time.Millisecond {
-		t.Errorf("booked=%v wait=%v err=%v, want the second slot (<= 100 ms away)", booked, wait, err)
+	if interval := time.Duration(l.interval) * time.Microsecond; err != nil || !booked || wait > interval {
+		t.Errorf("booked=%v wait=%v err=%v, want the second slot (<= %v away)", booked, wait, err, interval)
 	}
 }
 

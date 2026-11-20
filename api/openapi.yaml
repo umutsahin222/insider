@@ -394,6 +394,30 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Health' }
 
+  /openapi.yaml:
+    get:
+      tags: [ops]
+      operationId: openapiSpec
+      summary: This OpenAPI document
+      responses:
+        '200':
+          description: The contract, as served by the running API.
+          content:
+            application/yaml:
+              schema: { type: string }
+
+  /docs:
+    get:
+      tags: [ops]
+      operationId: apiDocs
+      summary: Interactive API documentation (Swagger UI)
+      responses:
+        '200':
+          description: An HTML page rendering /openapi.yaml with Swagger UI.
+          content:
+            text/html:
+              schema: { type: string }
+
   /metrics:
     get:
       tags: [ops]

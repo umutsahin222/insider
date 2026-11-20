@@ -86,6 +86,8 @@ type Deps struct {
 	// Tracing creates a server span per request and its context is stored with every
 	// notification for the worker to continue; nil propagates context without recording.
 	Tracing *observability.Tracing
+	// OpenAPI, if set, is served at GET /openapi.yaml and rendered with Swagger UI at GET /docs.
+	OpenAPI []byte
 }
 
 const (
@@ -135,6 +137,10 @@ func NewRouter(d Deps) http.Handler {
 	if d.MetricsHandler != nil {
 		r.Method(http.MethodGet, "/metrics", d.MetricsHandler)
 	}
+	if len(d.OpenAPI) > 0 {
+		r.Get("/openapi.yaml", serveOpenAPI(d.OpenAPI))
+		r.Get("/docs", serveDocs)
+	}
 
 	r.Route("/v1", func(r chi.Router) {
 		r.With(maxBody(maxSingleBody)).Post("/notifications", a.createNotification)
@@ -170,8 +176,8 @@ func NewRouter(d Deps) http.Handler {
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return r.Method }),
 		otelhttp.WithFilter(func(r *http.Request) bool {
 			switch r.URL.Path {
-			case "/healthz", "/readyz", "/metrics":
-				return false // probes and scrapes would drown real traces
+			case "/healthz", "/readyz", "/metrics", "/openapi.yaml", "/docs":
+				return false // probes, scrapes and docs would drown real traces
 			case "/v1/ws":
 				return false // a span lasting as long as the connection says nothing useful
 			}

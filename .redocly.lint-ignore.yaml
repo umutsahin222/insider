@@ -6,5 +6,7 @@ api/openapi.yaml:
     - '#/paths/~1healthz/get/responses'
     - '#/paths/~1readyz/get/responses'
     - '#/paths/~1metrics/get/responses'
+    - '#/paths/~1openapi.yaml/get/responses'
+    - '#/paths/~1docs/get/responses'
   operation-2xx-response:
     - '#/paths/~1v1~1ws/get/responses'

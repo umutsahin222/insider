@@ -14,6 +14,7 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	apispec "github.com/umutsahin222/insider/api"
 	"github.com/umutsahin222/insider/internal/config"
 	"github.com/umutsahin222/insider/internal/events"
 	"github.com/umutsahin222/insider/internal/httpapi"
@@ -99,6 +100,7 @@ func run() error {
 		Stream:           hub,
 		WebSocketOrigins: cfg.WebSocketOrigins,
 		Tracing:          tracing,
+		OpenAPI:          apispec.OpenAPI,
 	})
 
 	srv := &http.Server{

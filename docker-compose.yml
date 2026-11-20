@@ -1,6 +1,6 @@
 # One-command setup: docker compose up --build
 #
-#   API            http://localhost:8080      (OpenAPI: api/openapi.yaml)
+#   API            http://localhost:8080      (docs: /docs, contract: /openapi.yaml)
 #   Jaeger UI      http://localhost:16686
 #   Prometheus     http://localhost:9090
 #   Mock provider  http://localhost:8090/stats

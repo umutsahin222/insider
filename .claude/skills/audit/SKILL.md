@@ -38,9 +38,19 @@ each name:
 Give each the same prompt: the scope mode, the range or path, and the file list. Tell
 `test-adequacy-auditor` explicitly whether it runs in diff mode or `all` mode.
 
-Each must answer with a JSON array. If one answers with prose or broken JSON, ask it once (via
-SendMessage) for the JSON array only. If it still fails, record that agent as "no usable output"
-in the report rather than guessing its findings.
+Four auditors answer with a JSON array of findings. `architecture-auditor` answers with a JSON
+object `{agent, scope, checks_executed, findings}`.
+
+**Check coverage before accepting an answer.** `architecture-auditor`'s `checks_executed` must
+contain all four mandatory checks (`dependency-direction`, `global-state-scan`,
+`metric-label-cardinality`, `business-rule-leakage`), each with a concrete `method` and
+`evidence` (what was run, and how many packages, files or call sites were covered). If a check
+is missing or its evidence is vague, send the agent back once (via SendMessage), naming the
+missing checks. If it still falls short, do **not** report its empty result as "no findings":
+mark it "incomplete coverage" in the report, listing the checks that did not run.
+
+If an auditor answers with prose or broken JSON, ask it once for the JSON only. If it still
+fails, record that agent as "no usable output" in the report rather than guessing its findings.
 
 ## 3. Merge
 - Concatenate the arrays.
@@ -56,7 +66,8 @@ verifier's reason for the report: transparency about false positives is part of 
 ## 5. Report
 Write `docs/audits/<YYYY-MM-DD>-<scope>.md`. Use `diff-<short sha>`, `all`, or a slug of the
 path as `<scope>`; add `-2`, `-3` if the file exists. Contents:
-1. **Header:** date, commit, scope, file count, which agents ran and on which models.
+1. **Header:** date, commit, scope, file count, which agents ran and on which models, and
+   architecture-auditor's `checks_executed` (check, evidence, result) as a small table.
 2. **Summary table:** raw findings per agent → after de-duplication → confirmed / rejected.
 3. **Confirmed findings,** most severe first: id, severity, rule, `file:line`, evidence,
    failure scenario, verifier confidence and verification note.

@@ -40,9 +40,10 @@ Plain `docker-compose up` works too: Compose builds the image on first start.
 | URL | What |
 |---|---|
 | http://localhost:8080 | API (`/v1/...`, `/healthz`, `/readyz`, `/metrics`) |
+| http://localhost:8080/docs | Interactive API docs (Swagger UI over `/openapi.yaml`) |
 | http://localhost:16686 | Jaeger: traces from API request to provider call |
 | http://localhost:9090 | Prometheus: scrapes the API and every worker replica, with alert rules |
-| http://localhost:8090/stats | Mock provider: calls received and failures injected |
+| http://localhost:8090/stats | Mock provider: calls accepted, failures injected, and the busiest second per channel (`peak_per_second`) |
 
 The mock provider fails 10% of calls on purpose so retries are visible. Every host port can be
 changed with an environment variable (`API_PORT`, `JAEGER_UI_PORT`, `PROMETHEUS_PORT`,
@@ -65,7 +66,7 @@ make down                                # stop and delete volumes
 | Cancel pending | `POST /v1/notifications/{id}/cancel`, `POST /v1/batches/{id}/cancel`; conditional UPDATE, `409` if no longer pending | |
 | List with filters and pagination | `GET /v1/notifications?status=&channel=&batch_id=&from=&to=&limit=&cursor=`, keyset pagination | |
 | Asynchronous queue workers | Postgres is the queue: `FOR UPDATE SKIP LOCKED` claims, leases, a reaper | [ADR-001](docs/adr/001-postgres-as-queue.md), [ADR-005](docs/adr/005-lease-fencing-and-db-clock.md) |
-| 100 msg/s per channel | Redis Lua token bucket shared by all worker replicas | [ADR-003](docs/adr/003-rate-limiting.md) |
+| 100 msg/s per channel | GCRA slot reservation in Redis Lua, shared by all worker replicas: never more than 100 sends in any 1-second window | [ADR-003](docs/adr/003-rate-limiting.md) |
 | Priority queue | Claims order by `priority, next_attempt_at` | ADR-001 |
 | Content validation | E.164 phone numbers, email addresses, push tokens; 160 / 10 000 / 256 characters; all errors reported at once | [`validation.go`](internal/domain/validation.go) |
 | Idempotency | `Idempotency-Key` on single and batch creates; replay returns `200`, reuse with a different body returns `422` | [ADR-006](docs/adr/006-idempotency-fingerprints-and-batch-keys.md) |
@@ -102,7 +103,7 @@ flowchart LR
         reaper[lease reaper]
     end
 
-    loops -->|token per send| redis[(Redis)]
+    loops -->|slot per send| redis[(Redis)]
     loops --> breaker -->|POST + X-Idempotency-Key| provider[provider<br/>webhook.site or mock]
     loops -->|outcome, fenced UPDATE| pg
     reaper -->|expired leases back to pending| pg
@@ -145,7 +146,7 @@ stateDiagram-v2
 |---|---|
 | [001](docs/adr/001-postgres-as-queue.md) | Postgres as source of truth and queue; Redis only for rate limiting and events |
 | [002](docs/adr/002-delivery-and-retry.md) | Outcome classification, backoff with full jitter, ratio-based circuit breaker, dead letter and manual retry |
-| [003](docs/adr/003-rate-limiting.md) | Distributed token bucket in Redis Lua on the Redis clock; fails closed |
+| [003](docs/adr/003-rate-limiting.md) | Distributed GCRA slot reservation in Redis Lua on the Redis clock; fails closed |
 | [004](docs/adr/004-api-conventions.md) | RFC 9457 errors, all-or-nothing batches, keyset pagination, correlation IDs |
 | [005](docs/adr/005-lease-fencing-and-db-clock.md) | `attempts` as fencing token; the database clock is the only queue clock; send deadline per claimed row |
 | [006](docs/adr/006-idempotency-fingerprints-and-batch-keys.md) | Request fingerprints distinguish an idempotent replay from a reused key |
@@ -157,6 +158,8 @@ stateDiagram-v2
 ## API examples
 
 The full contract with every field, error and example is [`api/openapi.yaml`](api/openapi.yaml).
+The running API serves it at `/openapi.yaml` and renders it at http://localhost:8080/docs, where
+every request can be tried from the browser.
 Errors are RFC 9457 `application/problem+json` with per-field details. Every response carries
 `X-Correlation-ID`; send your own to follow a request through logs.
 
@@ -360,6 +363,14 @@ The worker posts `{"to", "channel", "content"}` exactly as the brief specifies, 
 `X-Idempotency-Key`, `X-Correlation-ID` and `traceparent`. The image includes CA certificates, so
 HTTPS providers work out of the box.
 
+Verified live: an SMS, an email and a push sent through a real webhook.site URL arrived as
+`{"to", "channel", "content"}` with all three headers, got `202`, and the configured `messageId`
+was stored on each notification. Provider latency was 330–600 ms.
+
+With latency like that, one worker's 8 loops per channel send about 8 / 0.4 s = 20 messages per
+second. To use the full 100/s against a slow provider, raise `WORKER_CONCURRENCY` or scale out
+workers; the limit holds either way.
+
 A free webhook.site URL accepts only a limited number of requests in total (50 to 100, according
 to its documentation) and expires after 7 days. Past the limit it answers `429`, which the worker
 treats as retryable and eventually dead-letters. Use it to watch a handful of real deliveries, and
@@ -375,10 +386,12 @@ make lint-api     # OpenAPI contract (Redocly, via Docker)
 make migrate-up   # migrations through the compose migrate service
 ```
 
-Integration tests cover what unit tests cannot: 10 concurrent claimers over 300 rows with no
-double claims, lease fencing against a zombie worker, idempotent creates with 20 concurrent
-callers, three rate-limiter instances sharing one bucket, Redis pub/sub fan-out, recovery from a
-killed Redis connection, and prompt hub shutdown.
+Integration tests cover what unit tests cannot:
+- 10 concurrent claimers over 300 rows with no double claims;
+- lease fencing against a zombie worker;
+- idempotent creates with 20 concurrent callers;
+- three rate-limiter instances sharing one limit, with slots spaced exactly 10.1 ms apart;
+- Redis pub/sub fan-out, recovery from a killed Redis connection, and prompt hub shutdown.
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, the full test suite with
 `-race`, and an end-to-end job that starts the compose stack, runs [`scripts/smoke.sh`](scripts/smoke.sh),
 scales to three workers and runs it again.
@@ -396,7 +409,7 @@ internal/
   httpapi/         chi handlers, middleware, error mapping, WebSocket
   delivery/        worker loop, outcome classification, retry policy, circuit breaker, reaper
   store/postgres/  pgx store: notifications, work-queue operations, stats, templates
-  ratelimit/       Redis token bucket
+  ratelimit/       distributed rate limiter (GCRA slot reservation on Redis)
   provider/        provider HTTP client
   events/          status events over Redis pub/sub, per-process hub
   metrics/         Prometheus collectors

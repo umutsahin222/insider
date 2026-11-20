@@ -198,10 +198,25 @@ The audit also turned up three problems that were not in the script:
 With the fixes deployed, the full run passed 69 of 69. Stopping the API with a stream open now
 closed it with 1013 about 1.5 s after the stop command.
 
-The audit also measured something the earlier tests had hidden: the sustained send rate is about
-90/s per channel, not 100/s. That is a property of a burst-1 token bucket, and ADR-003 now
-records it, together with the reservation-based alternative (GCRA) that would use the full 100/s
-and cap every sliding second at exactly 100.
+The audit also measured something the earlier tests had hidden: the sustained send rate was about
+90/s per channel, not 100/s. That is a property of a burst-1 token bucket, which also allowed 101
+sends in a 1-second window in the worst case. Claude proposed replacing it with GCRA slot
+reservation, and the developer approved, together with a live webhook.site test and a Swagger UI
+page. What followed:
+
+- **GCRA limiter:** each send books the next slot atomically in Redis and sleeps until it, with no
+  polling. The first measurement showed 103 in one second. Claude traced that to measuring at the
+  wrong point: the database timestamps include the mock's random latency. Measured by send start
+  the peak was 101, which exposed a real edge: with slots exactly 10 ms apart, timing jitter puts
+  101 requests inside one second at the provider. So slots are now (1 s + 10 ms) / 100 apart. To
+  measure where it matters, the mock provider now records arrivals per channel. Result: the
+  provider's busiest second is 100 with one worker and with three, at 99–100 calls per second.
+  The smoke test asserts it in CI.
+- **webhook.site:** an SMS, an email and a push sent through a real URL (created and deleted via
+  webhook.site's API) arrived in exactly the brief's format with all three headers, got `202`,
+  and stored the configured `messageId`. This also proved HTTPS from the distroless image.
+- **API docs:** the running API serves its contract at `/openapi.yaml` and renders it with
+  Swagger UI at `/docs`.
 
 ## 7. Tools Claude installed itself (no admin rights)
 

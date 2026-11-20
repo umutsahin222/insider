@@ -35,6 +35,8 @@ docker compose up --build        # or: make up  (background, returns when health
 make smoke                       # end-to-end checks against the running stack
 ```
 
+Plain `docker-compose up` works too: Compose builds the image on first start.
+
 | URL | What |
 |---|---|
 | http://localhost:8080 | API (`/v1/...`, `/healthz`, `/readyz`, `/metrics`) |
@@ -309,9 +311,10 @@ The spec leaves this to the candidate. Full reasoning is in
   - Prometheus discovers every worker replica through DNS, and ships with
     [alert rules](deploy/prometheus/alerts.yml) for queue lag, failure rate, an open breaker and
     unreadable queue stats.
-- **Logs:** JSON (`log/slog`). Every line of a request or delivery carries `correlation_id`
-  (taken from `X-Correlation-ID` or generated), `notification_id`, and `trace_id`/`span_id`. The
-  correlation ID is stored with the notification and forwarded to the provider.
+- **Logs:** JSON (`log/slog`). Every request and delivery log line carries `correlation_id`
+  (taken from `X-Correlation-ID` or generated) and `trace_id`/`span_id`; delivery lines also carry
+  `notification_id`. The correlation ID is stored with the notification, so the worker's lines for
+  every attempt share the ID of the request that created it, and it is forwarded to the provider.
 - **Traces:** the API request span, the worker's span for every attempt (with a `ratelimit.wait`
   child) and the provider HTTP call form one trace, because the trace context is stored with the
   notification. Open Jaeger and search for service `notification-api`.
@@ -340,10 +343,13 @@ at once and the binary refuses to start.
 
 ## Using webhook.site as the provider
 
-1. Create a URL at [webhook.site](https://webhook.site) and set its response to status `202` with
-   a body like
+1. Create a URL at [webhook.site](https://webhook.site). Under **Edit**, set the default response
+   to status `202`, content type `application/json` and a body like
    `{"messageId": "3f2b8c1e-0d4a-4a8e-9a57-1c2d3e4f5a6b", "status": "accepted", "timestamp": "2026-11-19T12:00:00Z"}`.
-   The worker stores `messageId` as `provider_message_id`.
+   webhook.site's API can do the same (`POST https://webhook.site/token` with `default_status`,
+   `default_content` and `default_content_type`). The worker stores `messageId` as
+   `provider_message_id`. Any `2xx` counts as accepted, so an unconfigured URL (`200` with an HTML
+   body) also works, just without a message ID.
 2. Start the stack against it:
 
    ```bash
@@ -351,8 +357,13 @@ at once and the binary refuses to start.
    ```
 
 The worker posts `{"to", "channel", "content"}` exactly as the brief specifies, plus the headers
-`X-Idempotency-Key`, `X-Correlation-ID` and `traceparent`. Keep `RATE_LIMIT_PER_SECOND` low for
-webhook.site's free tier.
+`X-Idempotency-Key`, `X-Correlation-ID` and `traceparent`. The image includes CA certificates, so
+HTTPS providers work out of the box.
+
+A free webhook.site URL accepts only a limited number of requests in total (50 to 100, according
+to its documentation) and expires after 7 days. Past the limit it answers `429`, which the worker
+treats as retryable and eventually dead-letters. Use it to watch a handful of real deliveries, and
+the mock provider for load.
 
 ## Development
 
@@ -366,7 +377,8 @@ make migrate-up   # migrations through the compose migrate service
 
 Integration tests cover what unit tests cannot: 10 concurrent claimers over 300 rows with no
 double claims, lease fencing against a zombie worker, idempotent creates with 20 concurrent
-callers, three rate-limiter instances sharing one bucket, Redis pub/sub fan-out and reconnects.
+callers, three rate-limiter instances sharing one bucket, Redis pub/sub fan-out, recovery from a
+killed Redis connection, and prompt hub shutdown.
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, the full test suite with
 `-race`, and an end-to-end job that starts the compose stack, runs [`scripts/smoke.sh`](scripts/smoke.sh),
 scales to three workers and runs it again.

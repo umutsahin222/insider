@@ -14,7 +14,9 @@ unit tests, integration tests against real Postgres and Redis, and then the whol
 load in Docker. That last step found most of the bugs worth talking about, and each one led to a
 fix commit or an ADR. At the end, `/code-review` and `/security-review` went over the whole
 codebase. Claude verified the ten code-review findings one by one and fixed nine; the tenth is a
-documented exception.
+documented exception. A final audit then checked every line of the brief against the running
+system. It found two real bugs, a related timeout gap, and three mistakes in Claude's own test
+expectations.
 
 ## 1. Setting up the session
 
@@ -147,7 +149,61 @@ review found no high or medium issues. What it checked:
 - The container is distroless and runs as non-root.
 - No CI workflow lets untrusted input reach an expression.
 
-## 6. Tools Claude installed itself (no admin rights)
+## 6. Final audit against the brief
+
+After the reviews, the developer asked: "Does it do everything the PDF asks, completely and
+correctly? Is anything missing or wrong?" Claude went through the brief line by line, first in
+the code, then on the running stack. It wrote an acceptance script with one check per requirement
+(69 checks, nearly all of them HTTP calls), plus SQL over `delivery_attempts` to measure rate
+limits and priority order. Examples:
+
+- 1000-item batches, and 1001 rejected;
+- validation limits counted in characters, including Turkish letters;
+- idempotent replay and key reuse;
+- keyset pagination over 1000 rows with no duplicates or gaps;
+- cancel and its conflicts;
+- 2000 notifications across two channels, with 100/s checked per sliding second;
+- priority under load;
+- scheduled delivery;
+- correlation IDs in API and worker logs;
+- one Jaeger trace across API, worker and provider;
+- `/v1/stats`;
+- a WebSocket stream (snapshot, then live events);
+- dead letter, then manual retry.
+
+The first run passed 65 of 69. Each of the four failures was examined before anything changed:
+
+| Failure | Verdict |
+|---|---|
+| An empty request reported only `channel`, because recipient and content checks depended on a valid channel | **Real.** ADR-004 and the README promise every error at once. Missing fields are now reported whatever the channel. |
+| A malformed ID in the path returned `404`, the script expected `400` | **Script was wrong.** `404` is a deliberate choice, documented in the code: a malformed ID cannot name any resource. |
+| 999 of 1000 SMS were sent | **Script was wrong.** The missing one failed five real injected errors (500, 429, 429, 500, 429) and was dead-lettered as designed. That happens with probability 10⁻⁵ per message, so about 2% of 2000-message runs. The check now accepts a dead letter only if all five attempts were genuine failures. |
+| The last high-priority message was sent after 233 of 400 lows | **Script was wrong.** That message was a retry waiting out its backoff. By first attempts, the 50 highs took positions 1–97 (average 36), against an average of 249 for lows queued earlier. The check now measures first attempts. |
+
+The audit also turned up three problems that were not in the script:
+
+- **The README claimed something untested:** it listed "Redis reconnects" among the integration
+  tests, but reconnection had only been checked by hand. Claude wrote the missing test (kill the
+  hub's pub/sub connection in Redis, expect subscribers dropped and the hub resubscribed). Its first
+  version failed. The hub was not at fault: the previous test's hub still held its subscription,
+  so the kill hit the wrong connection.
+- **Hub shutdown hung (a real bug):** that leftover subscription lived on for 30 s, because
+  go-redis reads pub/sub messages without watching the context. So on API shutdown the hub never
+  sent WebSocket clients the promised 1013 close. A new test, which fails without the fix, pins
+  the behaviour, and `Hub.Run` now closes the subscription when its context ends.
+- **Context deadlines were ignored on Redis calls (the same class of bug):** go-redis does not
+  apply them to socket I/O by default (`ContextTimeoutEnabled`), so the publisher's documented
+  1 s timeout was really the library's 5 s. Both binaries now enable it.
+
+With the fixes deployed, the full run passed 69 of 69. Stopping the API with a stream open now
+closed it with 1013 about 1.5 s after the stop command.
+
+The audit also measured something the earlier tests had hidden: the sustained send rate is about
+90/s per channel, not 100/s. That is a property of a burst-1 token bucket, and ADR-003 now
+records it, together with the reservation-based alternative (GCRA) that would use the full 100/s
+and cap every sliding second at exactly 100.
+
+## 7. Tools Claude installed itself (no admin rights)
 
 | Tool | How |
 |---|---|
@@ -162,7 +218,7 @@ Windows quirks were fixed once and recorded, not rediscovered each time. For exa
 testcontainers reaper needs a Docker socket override, now built into `make test`, and Git Bash
 needs `MSYS_NO_PATHCONV` for docker volume paths.
 
-## 7. Where the developer steered
+## 8. Where the developer steered
 
 - **Decisions:** storage and queue technology, scope (all bonuses), and the language rule: code
   and docs in English, conversation in Turkish.
@@ -174,7 +230,7 @@ needs `MSYS_NO_PATHCONV` for docker volume paths.
 - **Gates:** every push, and choosing the "right way" when it mattered ("should we install gh? do
   it however is most correct").
 
-## 8. What did not go smoothly
+## 9. What did not go smoothly
 
 - **Shell quoting:** Python patch scripts embedded in Bash heredocs sometimes failed to parse.
   Claude switched to patch scripts written to a scratch folder, applied by a helper that requires

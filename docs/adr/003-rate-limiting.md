@@ -19,6 +19,14 @@ of 100 would allow ~200 in the first second after an idle period — violating t
 With burst 1 sends are evenly spaced (~10 ms apart). Measured end to end with 1000 SMS + 300 email
 queued at once: max 95 SMS and 94 email in any 1-second window, both channels in parallel.
 
+**Sustained rate is ~90/s, not 100/s.** Measured again in the final audit with 1000 SMS + 1000
+email at once: 88–93 calls per second per channel during the bulk phase, busiest sliding second 94.
+With burst 1 the bucket holds at most one token, so when a waiter takes it a millisecond late
+(ms-rounded wait, wake-up jitter, the Redis round trip) that millisecond is not recovered. A
+reservation-based limiter (GCRA: each call atomically books the next 10 ms slot and sleeps until
+it) would use the full 100/s and cap every sliding second at exactly 100 instead of `rate + burst`
+(101), at the cost of a different Lua script and of slots wasted by callers that give up.
+
 Each channel has its own worker pool, so a throttled or failing channel never blocks another.
 
 ## Consequences

@@ -27,10 +27,11 @@ func TestREQ_ENG4_ContentValidation(t *testing.T) {
 		want  int
 		field string
 	}{
-		{"sms at 160 chars", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("a", 160)}, 201, ""},
-		{"sms over 160 chars", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("a", 161)}, 422, "content"},
-		{"limit counts characters, not bytes", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("ş", 160)}, 201, ""},
-		{"multi-byte over limit", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("ğ", 161)}, 422, "content"},
+		{"sms at 160 GSM-7 chars", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("a", 160)}, 201, ""},
+		{"sms over 160 GSM-7 chars", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("a", 161)}, 422, "content"},
+		{"sms extension chars count twice", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("€", 81)}, 422, "content"},
+		{"sms needing UCS-2 at 70 chars", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("ş", 70)}, 201, ""},
+		{"sms needing UCS-2 over 70 chars", map[string]any{"channel": "sms", "recipient": phone, "content": strings.Repeat("ğ", 71)}, 422, "content"},
 		{"email at 10000 chars", map[string]any{"channel": "email", "recipient": "a@example.com", "content": strings.Repeat("x", 10000)}, 201, ""},
 		{"email over 10000 chars", map[string]any{"channel": "email", "recipient": "a@example.com", "content": strings.Repeat("x", 10001)}, 422, "content"},
 		{"push at 256 chars", map[string]any{"channel": "push", "recipient": "tok", "content": strings.Repeat("p", 256)}, 201, ""},

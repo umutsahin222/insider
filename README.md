@@ -71,7 +71,7 @@ make down                                # stop and delete volumes
 | Asynchronous queue workers | Postgres is the queue: `FOR UPDATE SKIP LOCKED` claims, leases, a reaper | [ADR-001](docs/adr/001-postgres-as-queue.md), [ADR-005](docs/adr/005-lease-fencing-and-db-clock.md) |
 | 100 msg/s per channel | GCRA slot reservation in Redis Lua, shared by all worker replicas: never more than 100 sends in any 1-second window | [ADR-003](docs/adr/003-rate-limiting.md) |
 | Priority queue | Claims order by `priority, next_attempt_at` | ADR-001 |
-| Content validation | E.164 phone numbers, email addresses, push tokens; 160 / 10 000 / 256 characters; all errors reported at once | [`validation.go`](internal/domain/validation.go) |
+| Content validation | E.164 phone numbers, email addresses, push tokens; SMS measured in segments (160 GSM-7 or 70 UCS-2 characters each), 10 000 characters for email, 256 for push; all errors reported at once | [`validation.go`](internal/domain/validation.go), [`sms.go`](internal/domain/sms.go) |
 | Idempotency | `Idempotency-Key` on single and batch creates; replay returns `200`, reuse with a different body returns `422` | [ADR-006](docs/adr/006-idempotency-fingerprints-and-batch-keys.md) |
 | Delivery and retry logic | Classified outcomes, exponential backoff with full jitter, `Retry-After`, circuit breaker, dead letter plus manual retry | [ADR-002](docs/adr/002-delivery-and-retry.md) |
 | Metrics (queue depth, success and failure rates, latency) | Prometheus `/metrics` on API and workers, plus `GET /v1/stats` | [ADR-007](docs/adr/007-observability.md) |
@@ -196,6 +196,12 @@ curl -s localhost:8080/v1/notifications -H 'Content-Type: application/json' \
            {"field":"content","message":"is required"}]}
 ```
 
+SMS length is measured the way the message travels: 160 characters in GSM-7, but only 70 as
+soon as one character is outside that alphabet (Turkish `ş`, `ğ`, `ı`, `ç`, or an emoji), because
+the text is then sent as UCS-2. By default a notification must fit in one SMS, so it is always
+one billed message; `SMS_MAX_SEGMENTS` allows longer, concatenated texts (153 or 67 characters
+per segment). The error says which character forced UCS-2.
+
 **Schedule for later** (any time up to 30 days ahead; on macOS use `date -u -v+10M …`):
 
 ```bash
@@ -216,7 +222,7 @@ curl -s localhost:8080/v1/notifications -H 'Content-Type: application/json' \
 # -> "content":"Hi Ada, your code is 4242 (priority support)"
 ```
 
-The rendered text is validated like literal content (e.g. 160 characters for SMS). Every
+The rendered text is validated like literal content (e.g. the SMS segment limit). Every
 variable a template references must be supplied. Templates are a deliberately small subset of Go
 `text/template` (variables, `if`/`else`/`with`, comparisons): `range`, recursion and formatting
 functions are rejected so rendering stays cheap ([ADR-009](docs/adr/009-templates.md)).
@@ -337,7 +343,7 @@ at once and the binary refuses to start.
 | `HTTP_ADDR` | `:8080` (API), `:9091` (worker ops) | both |
 | `LOG_LEVEL` | `info` | both |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `TRACE_SAMPLE_RATIO` | off, `1` | both |
-| `SMS_MAX_LENGTH`, `EMAIL_MAX_LENGTH`, `PUSH_MAX_LENGTH` | `160`, `10000`, `256` | API |
+| `SMS_MAX_SEGMENTS`, `EMAIL_MAX_LENGTH`, `PUSH_MAX_LENGTH` | `1`, `10000`, `256` | API |
 | `MAX_BATCH_SIZE`, `MAX_ATTEMPTS`, `MAX_SCHEDULE_AHEAD` | `1000`, `5`, `720h` | API |
 | `WS_ALLOWED_ORIGINS` | empty (same origin only) | API |
 | `PROVIDER_URL`, `PROVIDER_TIMEOUT` | mock provider, `5s` | worker |

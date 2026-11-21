@@ -22,8 +22,13 @@ hard to change once clients depend on them.
   that already exists rejects the batch with `409`. Keys are unique globally (partial unique index).
 - **Scheduling:** `scheduled_at` only sets the initial `next_attempt_at`; values in the past mean
   "now", values more than 30 days ahead are rejected.
-- **Content limits** are counted in characters (runes) and configurable: SMS 160 (one GSM-7
-  segment; multipart is out of scope), email 10 000, push 256.
+- **Content limits** are configurable: email 10 000 and push 256 characters (runes). SMS is
+  measured in segments the way the network sends it: 160 GSM-7 characters per segment (extension
+  characters such as `€` take two), or 70 UCS-2 units once any character is outside GSM-7;
+  concatenated texts use 153 / 67 per segment. The default is one segment, so a notification is
+  one billed SMS (`SMS_MAX_SEGMENTS` raises it).
+  *Revised 2026-11-21:* SMS was first capped at 160 runes whatever the alphabet, which accepted
+  texts with Turkish letters that actually need three UCS-2 segments.
 - **Pagination** is keyset over `(created_at DESC, id DESC)` with an opaque cursor — stable under
   concurrent inserts and O(log n) per page, unlike OFFSET.
 - The DB enforces invariants too (enum types, CHECK constraints such as "sent ⇒ sent_at set"), as a

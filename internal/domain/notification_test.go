@@ -57,7 +57,11 @@ func TestNewNotification_Validation(t *testing.T) {
 		{"missing content", func(in *CreateInput) { in.Content = "\n\t " }, []string{"content"}},
 		{"sms at limit", func(in *CreateInput) { in.Content = strings.Repeat("a", 160) }, nil},
 		{"sms over limit", func(in *CreateInput) { in.Content = strings.Repeat("a", 161) }, []string{"content"}},
-		{"limit counts runes not bytes", func(in *CreateInput) { in.Content = strings.Repeat("ş", 160) }, nil},
+		{"ucs-2 sms at limit", func(in *CreateInput) { in.Content = strings.Repeat("ş", 70) }, nil},
+		{"ucs-2 sms over limit", func(in *CreateInput) { in.Content = strings.Repeat("ş", 71) }, []string{"content"}},
+		{"email limit counts runes not bytes", func(in *CreateInput) {
+			in.Channel, in.Recipient, in.Content = "email", "a@b.co", strings.Repeat("ş", 10_000)
+		}, nil},
 		{"push over limit", func(in *CreateInput) { in.Channel, in.Recipient, in.Content = "push", "tok", strings.Repeat("a", 257) }, []string{"content"}},
 		{"invalid utf8", func(in *CreateInput) { in.Content = "hi \xff" }, []string{"content"}},
 		{"bad priority", func(in *CreateInput) { in.Priority = "urgent" }, []string{"priority"}},

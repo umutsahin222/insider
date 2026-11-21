@@ -67,10 +67,10 @@ func loadAPI(lookup func(string) (string, bool)) (API, error) {
 		WebSocketOrigins: e.list("WS_ALLOWED_ORIGINS"),
 		Rules: domain.Rules{
 			MaxContentLength: map[domain.Channel]int{
-				domain.ChannelSMS:   e.int("SMS_MAX_LENGTH", rules.MaxContentLength[domain.ChannelSMS]),
 				domain.ChannelEmail: e.int("EMAIL_MAX_LENGTH", rules.MaxContentLength[domain.ChannelEmail]),
 				domain.ChannelPush:  e.int("PUSH_MAX_LENGTH", rules.MaxContentLength[domain.ChannelPush]),
 			},
+			MaxSMSSegments:          e.int("SMS_MAX_SEGMENTS", rules.MaxSMSSegments),
 			MaxBatchSize:            e.int("MAX_BATCH_SIZE", rules.MaxBatchSize),
 			MaxScheduleAhead:        e.duration("MAX_SCHEDULE_AHEAD", rules.MaxScheduleAhead),
 			MaxAttempts:             e.int("MAX_ATTEMPTS", rules.MaxAttempts),
@@ -79,6 +79,10 @@ func loadAPI(lookup func(string) (string, bool)) (API, error) {
 	}
 	if cfg.Rules.MaxBatchSize < 1 || cfg.Rules.MaxAttempts < 1 {
 		e.errs = append(e.errs, errors.New("MAX_BATCH_SIZE and MAX_ATTEMPTS must be positive"))
+	}
+	// A concatenated SMS numbers its parts with one byte.
+	if s := cfg.Rules.MaxSMSSegments; s < 1 || s > 255 {
+		e.errs = append(e.errs, fmt.Errorf("SMS_MAX_SEGMENTS must be between 1 and 255, got %d", s))
 	}
 	e.positive(map[string]time.Duration{
 		"SHUTDOWN_TIMEOUT": cfg.ShutdownTimeout, "MAX_SCHEDULE_AHEAD": cfg.Rules.MaxScheduleAhead,

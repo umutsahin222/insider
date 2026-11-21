@@ -35,7 +35,7 @@ paths:
       description: |
         Validates and enqueues one notification. Supply either `content` or `template`.
         A template is rendered at creation; the rendered text is stored as `content` and
-        validated like literal content (e.g. the 160-character SMS limit). An unknown template,
+        validated like literal content (e.g. the SMS segment limit). An unknown template,
         a channel mismatch or a missing variable is a `422` on `template.name` /
         `template.variables`.
 
@@ -600,8 +600,13 @@ components:
         content:
           type: string
           description: |
-            Message body. Limits (characters): sms 160, email 10000, push 256.
-            Mutually exclusive with `template`.
+            Message body. Mutually exclusive with `template`. Limits:
+            - email 10000 and push 256 characters;
+            - sms: one segment by default (`SMS_MAX_SEGMENTS`), i.e. 160 GSM-7 characters, where
+              `^ { } [ ] ~ \ | €` count as two, or 70 characters when the text contains any
+              character outside the GSM-7 alphabet (e.g. `ş`, `ç`, emoji) and is sent as UCS-2.
+              Emoji and other characters outside the Basic Multilingual Plane count as two.
+              Longer texts are split into segments of 153 (GSM-7) or 67 (UCS-2).
         template: { $ref: '#/components/schemas/TemplateRef' }
         priority: { $ref: '#/components/schemas/Priority' }
         scheduled_at:

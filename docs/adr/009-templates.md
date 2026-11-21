@@ -12,7 +12,7 @@ how to keep validation meaningful, and how to keep user-supplied templates safe 
   `content` (plus `template_id` for traceability). Workers never render; retries send exactly what
   was accepted; the idempotency fingerprint (ADR-006) covers rendered content and template ID, so
   the same template + variables replay correctly without hashing variables separately.
-- **Validate the rendered text** exactly like literal content (e.g. the 160-character SMS limit).
+- **Validate the rendered text** exactly like literal content (e.g. the SMS segment limit).
   Unknown template, channel mismatch, missing variable (`missingkey=error`) and content+template
   together are 422 field errors (`template.name`, `template.variables`, indexed as
   `items[i].template.*` in batches), reported together with every other problem. A missing

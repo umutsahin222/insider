@@ -33,9 +33,9 @@ every changed function to its callers.
    - No send started after the row's send deadline.
    - Outcome writes are bounded by a timeout even when detached from cancellation.
 4. **Context-honouring I/O.** Blocking calls must stop when their context ends: network reads,
-   Redis pub/sub receives (go-redis ignores ctx there unless the subscription is closed), channel
-   sends or receives without `select` on `ctx.Done()`, `time.Sleep` in loops, and `pool.Close()`
-   that waits on hung work.
+   blocking Redis stream reads (`XREAD BLOCK`: go-redis does not interrupt them on cancellation,
+   so the block time bounds shutdown), `LISTEN` waits, channel sends or receives without `select`
+   on `ctx.Done()`, `time.Sleep` in loops, and `pool.Close()` that waits on hung work.
 5. **Goroutine lifecycle.** Every `go` statement in production code has a stop path (context,
    closed channel, WaitGroup) that its owner uses on shutdown.
 6. **Shared state.** Maps or slices touched from several goroutines without a mutex. Locks held

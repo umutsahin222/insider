@@ -11,7 +11,8 @@ Two scalable services and two tools share one codebase (four binaries, one image
 - `cmd/healthcheck` – tiny probe for container health checks (the distroless image has no curl)
 
 PostgreSQL is both the source of truth **and** the queue (`FOR UPDATE SKIP LOCKED`).
-Redis is used for the distributed rate limiter and status-event pub/sub. See `docs/adr/`.
+Redis is used for the distributed rate limiter and the status-event stream, fed by a transactional
+outbox in Postgres (ADR-012). See `docs/adr/`.
 
 ## Architecture rules
 - Dependency direction: `httpapi`/`delivery` → `domain` ← `store/*`. `domain` imports nothing from the project.

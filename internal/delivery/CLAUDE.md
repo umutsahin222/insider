@@ -16,8 +16,9 @@ Invariants for this package:
   Polling stays as the fallback; never make a wake-up the only path to work.
 - Outcome writes run detached from shutdown (`context.WithoutCancel`), always with
   `StoreTimeout`. Any new I/O must honour a context with a deadline.
-- Every recorded outcome publishes a status event (best-effort, never blocking). A lost lease
-  publishes nothing: the newer attempt owns the outcome.
+- **The worker publishes no status events.** The database records one with every status change,
+  in the same statement (outbox triggers, ADR-012), and a lost lease records nothing because its
+  fenced UPDATE changes nothing. Do not add publish calls here.
 - Metrics and release reasons come from the closed sets in `metrics.go`. Never label by ID.
 - Log through the notification's context (`notificationContext`) so `correlation_id` and
   `notification_id` are attached exactly once.

@@ -14,8 +14,11 @@ The HTTP layer: decode → domain → store → encode. Invariants for this pack
 - A malformed path ID returns `404` (it cannot name a resource). A malformed query parameter
   returns `400` with field errors.
 - Metrics use the chi **route pattern**, never the raw path, and `knownMethod(r.Method)`, never
-  the raw method. Consumer-defined interfaces (`Metrics`, `Events`, `EventStream`, `StatsStore`)
-  keep Prometheus and Redis types out of this package.
-- WebSocket order is subscribe → snapshot (read after subscribing) → live events (ADR-008).
+  the raw method. Consumer-defined interfaces (`Metrics`, `EventStream`, `StatsStore`) keep
+  Prometheus and Redis types out of this package.
+- Handlers publish no status events; the database records them with every transition (ADR-012).
+- WebSocket order is subscribe → replay after `after` (if the stream can prove completeness) or
+  snapshot (read after subscribing) → live events, skipping live events the replay already sent
+  (ADR-008, ADR-012).
 - Tests use `httptest` with the fakes in `notifications_test.go`. Write routes need a test for
   validation errors and idempotent replay where relevant.

@@ -38,6 +38,18 @@ groups:
         annotations:
           summary: "{{ $labels.channel }}: circuit breaker open, deliveries paused"
 
+      # Status events pile up in the outbox when Redis is down or no worker relays (ADR-012).
+      # Delivery is unaffected; WebSocket clients just stop hearing about it.
+      - alert: StatusEventsNotRelayed
+        expr: max(notification_outbox_oldest_age_seconds) > 30
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Status events have waited {{ $value | humanizeDuration }} in the outbox"
+          description: >-
+            Check Redis and that some worker reports notification_outbox_relay_leader 1.
+            Events are kept and relayed in order once the relay recovers.
+
       - alert: NotificationQueueStatsDown
         expr: max(notification_queue_stats_up) == 0
         for: 2m

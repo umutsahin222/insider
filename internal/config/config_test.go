@@ -67,7 +67,7 @@ func TestLoadWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 || cfg.HTTPAddr != ":9091" || cfg.PollInterval != time.Second || cfg.ClaimBatchSize != 2 || cfg.RateLimitMargin != 50*time.Millisecond ||
+	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 || cfg.HTTPAddr != ":9091" || cfg.PollInterval != time.Second || cfg.ClaimBatchSize != 2 || cfg.RateLimitMargin != 50*time.Millisecond || cfg.EventStreamMaxLen != 100_000 ||
 		cfg.BreakerFailures != 10 || cfg.BreakerFailureRatio != 0.5 || cfg.BreakerMinRequests != 20 {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
@@ -93,6 +93,7 @@ func TestLoadWorker(t *testing.T) {
 		"sample ratio above 1":                {"TRACE_SAMPLE_RATIO": "2"},
 		"negative rate limit margin":          {"RATE_LIMIT_MARGIN": "-1ms"},
 		"rate limit margin of a second":       {"RATE_LIMIT_MARGIN": "1s"},
+		"zero event stream length":            {"EVENT_STREAM_MAXLEN": "0"},
 	}
 	for name, env := range tests {
 		if _, err := loadWorker(lookupFrom(env)); err == nil {

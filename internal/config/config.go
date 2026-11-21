@@ -121,6 +121,10 @@ type Worker struct {
 	RetryBase time.Duration
 	RetryMax  time.Duration
 
+	// EventStreamMaxLen is roughly how many status events the Redis stream keeps (ADR-012);
+	// it bounds how far back a WebSocket client can resume.
+	EventStreamMaxLen int64
+
 	// Circuit breaker (ADR-002): opens on BreakerFailures consecutive retryable failures, or
 	// on a failure ratio of BreakerFailureRatio over at least BreakerMinRequests calls
 	// within BreakerWindow.
@@ -165,6 +169,7 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 		RateLimitPerSecond: float64(e.int("RATE_LIMIT_PER_SECOND", 100)),
 		RateLimitBurst:     e.int("RATE_LIMIT_BURST", 1),
 		RateLimitMargin:    e.duration("RATE_LIMIT_MARGIN", 50*time.Millisecond),
+		EventStreamMaxLen:  int64(e.int("EVENT_STREAM_MAXLEN", 100_000)),
 
 		RetryBase: e.duration("RETRY_BASE", 2*time.Second),
 		RetryMax:  e.duration("RETRY_MAX", 5*time.Minute),
@@ -181,6 +186,7 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 		"WORKER_CONCURRENCY": cfg.Concurrency, "CLAIM_BATCH_SIZE": cfg.ClaimBatchSize,
 		"RATE_LIMIT_PER_SECOND": int(cfg.RateLimitPerSecond), "RATE_LIMIT_BURST": cfg.RateLimitBurst,
 		"BREAKER_FAILURES": cfg.BreakerFailures, "BREAKER_MIN_REQUESTS": cfg.BreakerMinRequests,
+		"EVENT_STREAM_MAXLEN": int(cfg.EventStreamMaxLen),
 	} {
 		if v < 1 {
 			e.errs = append(e.errs, fmt.Errorf("%s must be positive", name))

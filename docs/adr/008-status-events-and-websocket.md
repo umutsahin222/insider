@@ -1,6 +1,9 @@
 # ADR-008: Status events over Redis pub/sub, streamed via WebSocket
 
-- Status: Accepted
+- Status: Transport superseded by [ADR-012](012-status-event-outbox-and-stream.md) (2026-11-21):
+  events now come from a transactional outbox through a Redis stream, and clients can resume.
+  The WebSocket contract here (subscribe first, then a snapshot, then live events; 1013 when
+  completeness cannot be guaranteed) still holds.
 - Date: 2026-11-19
 
 ## Context

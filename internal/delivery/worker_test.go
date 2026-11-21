@@ -410,15 +410,11 @@ func TestReaper_ReportsReclaimed(t *testing.T) {
 	reaped := []domain.Notification{claimed(2, 5), claimed(5, 5)}
 	reaped[0].Status, reaped[1].Status = domain.StatusPending, domain.StatusFailed
 	r := reaperFunc(func(context.Context) ([]domain.Notification, error) { cancel(); return reaped, nil })
-	ev := &recordingEvents{}
 
-	RunReaper(ctx, r, time.Millisecond, m, ev, testLogger())
+	RunReaper(ctx, r, time.Millisecond, m, testLogger())
 
 	if m.reclaimed != 2 {
 		t.Errorf("reclaimed = %d, want 2", m.reclaimed)
-	}
-	if got := ev.statuses(); strings.Join(got, ",") != "pending,failed" {
-		t.Errorf("events = %v, want pending,failed", got)
 	}
 }
 
@@ -502,70 +498,4 @@ type cancelingSender struct{ cancel context.CancelFunc }
 func (s *cancelingSender) Send(context.Context, domain.Notification) (domain.ProviderReply, error) {
 	s.cancel()
 	return domain.ProviderReply{StatusCode: 202}, nil
-}
-
-// recordingEvents captures published status events.
-type recordingEvents struct {
-	mu  sync.Mutex
-	evs []domain.StatusEvent
-}
-
-func (r *recordingEvents) Publish(_ context.Context, evs ...domain.StatusEvent) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.evs = append(r.evs, evs...)
-}
-
-func (r *recordingEvents) statuses() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]string, len(r.evs))
-	for i, e := range r.evs {
-		out[i] = string(e.Status)
-	}
-	return out
-}
-
-func TestEvents_PublishedForEveryStateChange(t *testing.T) {
-	ev := &recordingEvents{}
-	s := &scriptedSender{reply: domain.ProviderReply{StatusCode: 202}}
-	w := NewWorker(testConfig(), Deps{Queue: &fakeQueue{}, Sender: s, Limiter: allow, Events: ev, Logger: testLogger()})
-
-	w.process(context.Background(), claimed(1, 5)) // processing, sent
-	s.reply = domain.ProviderReply{StatusCode: 503}
-	w.process(context.Background(), claimed(1, 5)) // processing, pending (retry)
-	s.reply = domain.ProviderReply{StatusCode: 400}
-	w.process(context.Background(), claimed(1, 5)) // processing, failed
-
-	want := "processing,sent,processing,pending,processing,failed"
-	if got := strings.Join(ev.statuses(), ","); got != want {
-		t.Errorf("events = %s, want %s", got, want)
-	}
-	if e := ev.evs[3]; e.Error == nil || e.Attempts != 1 {
-		t.Errorf("retry event = %+v, want the error and attempt number", e)
-	}
-}
-
-func TestEvents_ReleaseAnnouncesPendingWithAttemptHandedBack(t *testing.T) {
-	ev := &recordingEvents{}
-	limiterDown := limiterFunc(func(context.Context, string) error { return errors.New("redis down") })
-	w := NewWorker(testConfig(), Deps{Queue: &fakeQueue{}, Sender: &scriptedSender{}, Limiter: limiterDown, Events: ev, Logger: testLogger()})
-
-	w.process(context.Background(), claimed(3, 5))
-
-	if got := strings.Join(ev.statuses(), ","); got != "processing,pending" || ev.evs[1].Attempts != 2 {
-		t.Errorf("events = %s (attempts %d), want processing,pending with attempts 2", got, ev.evs[1].Attempts)
-	}
-}
-
-func TestEvents_NoneWhenLeaseLost(t *testing.T) {
-	ev := &recordingEvents{}
-	w := NewWorker(testConfig(), Deps{Queue: &leaseLosingQueue{}, Sender: &scriptedSender{reply: domain.ProviderReply{StatusCode: 202}},
-		Limiter: allow, Events: ev, Logger: testLogger()})
-
-	w.process(context.Background(), claimed(1, 5))
-
-	if got := strings.Join(ev.statuses(), ","); got != "processing" {
-		t.Errorf("events = %s, want only processing: a newer attempt owns the outcome", got)
-	}
 }

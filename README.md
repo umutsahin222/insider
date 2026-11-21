@@ -80,7 +80,7 @@ make down                                # stop and delete volumes
 | **Bonus:** failure handling | Retries, breaker, lease fencing, reaper, dead letter, manual retry | ADR-002, ADR-005 |
 | **Bonus:** scheduled notifications | `scheduled_at` (up to 30 days ahead) | |
 | **Bonus:** templates | `POST /v1/templates`, rendered at creation from a safe subset of `text/template` | [ADR-009](docs/adr/009-templates.md) |
-| **Bonus:** WebSocket updates | `GET /v1/ws?notification_id=…` or `?batch_id=…` | [ADR-008](docs/adr/008-status-events-and-websocket.md) |
+| **Bonus:** WebSocket updates | `GET /v1/ws?notification_id=…` or `?batch_id=…`, resumable with `&after=<event_id>`; events come from a transactional outbox, so none are lost | [ADR-008](docs/adr/008-status-events-and-websocket.md), [ADR-012](docs/adr/012-status-event-outbox-and-stream.md) |
 | **Bonus:** distributed tracing | OpenTelemetry API → worker → provider, viewable in Jaeger | ADR-007 |
 | **Bonus:** CI | GitHub Actions: lint, unit + integration tests with `-race`, compose e2e with 1 and 3 workers | [ADR-010](docs/adr/010-packaging-and-ci.md) |
 | Deliverables | OpenAPI spec, versioned migrations ([`migrations/`](migrations)), `make test`, `docker compose up` | |
@@ -97,7 +97,7 @@ flowchart LR
         hub[event hub]
     end
 
-    handlers -->|INSERT, one tx| pg[(PostgreSQL<br/>notifications = queue<br/>delivery_attempts, batches, templates)]
+    handlers -->|INSERT, one tx| pg[(PostgreSQL<br/>notifications = queue<br/>status_event_outbox<br/>delivery_attempts, batches, templates)]
     pg -->|claim: FOR UPDATE SKIP LOCKED| worker
     pg -. NOTIFY: new work .-> worker
 
@@ -105,21 +105,24 @@ flowchart LR
         loops[per-channel loops<br/>sms / email / push]
         breaker[circuit breaker<br/>per channel]
         reaper[lease reaper]
+        relay[outbox relay<br/>one leader]
     end
 
-    loops -->|slot per send| redis[(Redis)]
+    loops -->|slot per send| redis[(Redis<br/>rate limit<br/>event stream)]
     loops --> breaker -->|POST + X-Idempotency-Key| provider[provider<br/>webhook.site or mock]
     loops -->|outcome, fenced UPDATE| pg
     reaper -->|expired leases back to pending| pg
-    loops -. status events .-> redis
-    redis -. pub/sub .-> hub
+    pg -. status events, same tx .-> relay
+    relay -->|XADD| redis
+    redis -. XREAD .-> hub
     api & worker -. OTLP .-> jaeger[Jaeger]
     prometheus[Prometheus] -. scrape .-> api & worker
 ```
 
 **Why Postgres as the queue, not Kafka or RabbitMQ?** The notification row is both the record and
 the unit of work. Accepting a request is a single transaction, so a message can never be stored
-but not queued, or queued but not stored, and no outbox is needed. Priority, scheduled delivery
+but not queued, or queued but not stored, and the queue needs no outbox (status events, which leave
+the database, do; see below). Priority, scheduled delivery
 and retry backoff all fall out of one index ordered by `priority, next_attempt_at`. Cancellation
 and status queries read the same row the workers update. Workers do not have to poll for new work:
 the database announces it with `NOTIFY` on commit and idle workers claim at once
@@ -127,6 +130,18 @@ the database announces it with `NOTIFY` on commit and idle workers claim at once
 primary: comfortably thousands of messages per second, far above the 300/s the provider limits
 allow. [ADR-001](docs/adr/001-postgres-as-queue.md) records the trade-off and the migration path
 to a log-based broker.
+
+**Is it event-driven?** Yes, without a broker on the delivery path.
+- *Work is announced, not polled:* committing a notification wakes the workers (`NOTIFY`).
+- *Every status change is an event:* the statement that changes a status also writes the event
+  to a transactional outbox. One elected relay appends it to a Redis stream, and API processes
+  stream it to WebSocket clients, who can reconnect and resume after the last event they saw
+  ([ADR-012](docs/adr/012-status-event-outbox-and-stream.md)). Nothing is lost while Postgres
+  works.
+
+Delivery itself is a work queue: each notification is sent once, by one worker. A broker there
+would add a second copy of every message without adding speed, because the provider limit
+(100/s per channel), not the queue, bounds throughput.
 
 **Lifecycle of a notification.** Every transition is a conditional `UPDATE … WHERE status = …`,
 and transitions out of `processing` are additionally fenced on the attempt number, so a stale
@@ -157,10 +172,11 @@ stateDiagram-v2
 | [005](docs/adr/005-lease-fencing-and-db-clock.md) | `attempts` as fencing token; the database clock is the only queue clock; send deadline per claimed row |
 | [006](docs/adr/006-idempotency-fingerprints-and-batch-keys.md) | Request fingerprints distinguish an idempotent replay from a reused key |
 | [007](docs/adr/007-observability.md) | Prometheus with per-binary registries, OpenTelemetry without globals, `/v1/stats` |
-| [008](docs/adr/008-status-events-and-websocket.md) | Redis pub/sub as a hint channel; WebSocket = subscribe, snapshot, live |
+| [008](docs/adr/008-status-events-and-websocket.md) | WebSocket = subscribe, snapshot, live; 1013 when completeness cannot be guaranteed (transport replaced by 012) |
 | [009](docs/adr/009-templates.md) | Render at creation, validate the result, restricted template language |
 | [010](docs/adr/010-packaging-and-ci.md) | One distroless image, compose with health-ordered start-up, three-job CI |
 | [011](docs/adr/011-wake-workers-with-listen-notify.md) | New work wakes idle workers through LISTEN/NOTIFY; polling only catches work falling due |
+| [012](docs/adr/012-status-event-outbox-and-stream.md) | Status events from a transactional outbox, relayed by one elected worker to a Redis stream; clients resume by `event_id` |
 
 ## API examples
 
@@ -264,18 +280,27 @@ curl -s -X POST localhost:8080/v1/notifications/{id}/retry     # dead-lettered (
 ```
 
 **Live status over WebSocket** (here with [websocat](https://github.com/vi/websocat)): a snapshot
-first, then every transition.
+first, then every transition, each with an `event_id`. Recorded against the running stack, with
+the mock provider failing more often than its default:
 
 ```bash
-websocat 'ws://localhost:8080/v1/ws?batch_id={batch_id}'
+websocat 'ws://localhost:8080/v1/ws?notification_id={id}'     # or ?batch_id={batch_id}
 ```
 
 ```json
-{"notification_id":"…","batch_id":"…","status":"pending","attempts":0,"error":null,"occurred_at":"…"}
-{"notification_id":"…","batch_id":"…","status":"processing","attempts":1,"error":null,"occurred_at":"…"}
-{"notification_id":"…","batch_id":"…","status":"pending","attempts":1,"error":"provider responded 503 Service Unavailable","occurred_at":"…"}
-{"notification_id":"…","batch_id":"…","status":"sent","attempts":2,"error":null,"occurred_at":"…"}
+{"event_id":null,"notification_id":"01a1fede-…","batch_id":null,"status":"pending","attempts":0,"error":null,"occurred_at":"2026-11-21T16:09:26.229162Z"}
+{"event_id":"1795277366295-0","notification_id":"01a1fede-…","batch_id":null,"status":"pending","attempts":0,"error":null,"occurred_at":"2026-11-21T16:09:26.229162Z"}
+{"event_id":"1795277366295-1","notification_id":"01a1fede-…","batch_id":null,"status":"processing","attempts":1,"error":null,"occurred_at":"2026-11-21T16:09:26.242644Z"}
+{"event_id":"1795277366408-0","notification_id":"01a1fede-…","batch_id":null,"status":"pending","attempts":1,"error":"provider responded 429 Too Many Requests","occurred_at":"2026-11-21T16:09:26.286056Z"}
+{"event_id":"1795277367326-0","notification_id":"01a1fede-…","batch_id":null,"status":"processing","attempts":2,"error":"provider responded 429 Too Many Requests","occurred_at":"2026-11-21T16:09:27.287371Z"}
+{"event_id":"1795277367451-0","notification_id":"01a1fede-…","batch_id":null,"status":"sent","attempts":2,"error":null,"occurred_at":"2026-11-21T16:09:27.323751Z"}
 ```
+
+The first line is the snapshot (`event_id: null`); the second is the creation event arriving
+live, with the same `occurred_at`. Delivery is at least once, so an event that is already
+reflected in the snapshot can follow it. If the connection drops, reconnect with
+`&after=<last event_id>` to receive exactly what you missed. If the server cannot prove it still
+has all of it, it sends a fresh snapshot instead.
 
 **How is delivery going right now?** No Prometheus needed:
 
@@ -317,16 +342,19 @@ The spec leaves this to the candidate. Full reasoning is in
 
 - **Metrics** on `/metrics`:
   - API: `notification_queue_depth{channel,priority,state}`, `notification_queue_oldest_ready_age_seconds`,
+    `notification_outbox_pending`, `notification_outbox_oldest_age_seconds`,
     `http_requests_total`, `http_request_duration_seconds`, `notifications_accepted_total`,
-    `websocket_connections`.
+    `websocket_connections`, `notification_event_subscribers_dropped_total{reason}`.
   - Workers (`:9091`): `notification_deliveries_total{channel,outcome,result}`,
     `notification_provider_request_duration_seconds`, `notification_end_to_end_latency_seconds`,
     `notification_rate_limit_wait_seconds`, `notification_releases_total{reason}`,
-    `notification_circuit_breaker_state`, `notification_reaper_reclaimed_total`.
+    `notification_circuit_breaker_state`, `notification_reaper_reclaimed_total`,
+    `notification_outbox_relay_leader`, `notification_status_events_relayed_total`,
+    `notification_outbox_relay_publish_failures_total`.
   - Labels only come from closed sets (channel, priority, outcome, route pattern, standard HTTP method or `OTHER`), never IDs or raw paths.
   - Prometheus discovers every worker replica through DNS, and ships with
     [alert rules](deploy/prometheus/alerts.yml) for queue lag, failure rate, dead-lettered
-    notifications, an open breaker and unreadable queue stats. The rules have unit tests
+    notifications, an open breaker, status events stuck in the outbox and unreadable queue stats. The rules have unit tests
     (`make lint-alerts`, promtool), run in CI.
 - **Health:** the API (`:8080`) and every worker (`:9091`) serve two probes with different jobs.
   - `/healthz` (liveness) answers `200` while the process can serve HTTP and checks no
@@ -364,6 +392,7 @@ at once and the binary refuses to start.
 | `CHANNELS`, `WORKER_CONCURRENCY`, `CLAIM_BATCH_SIZE` | all, `8`, `2` | worker |
 | `LEASE_DURATION`, `REAPER_INTERVAL`, `POLL_INTERVAL` | `60s`, `10s`, `1s` | worker |
 | `RETRY_BASE`, `RETRY_MAX` | `2s`, `5m` | worker |
+| `EVENT_STREAM_MAXLEN` | `100000` (how far back WebSocket clients can resume) | worker |
 | `BREAKER_FAILURE_RATIO`, `BREAKER_MIN_REQUESTS`, `BREAKER_WINDOW`, `BREAKER_FAILURES`, `BREAKER_OPEN_TIMEOUT` | `0.5`, `20`, `10s`, `10`, `30s` | worker |
 
 ## Using webhook.site as the provider
@@ -420,7 +449,11 @@ Integration tests cover what unit tests cannot:
 - lease fencing against a zombie worker;
 - idempotent creates with 20 concurrent callers;
 - three rate-limiter instances sharing one limit, with slots spaced exactly one interval apart;
-- Redis pub/sub fan-out, recovery from a killed Redis connection, and prompt hub shutdown.
+- one outbox event per status change, written by the same statement, and none when a lease was lost;
+- relay leadership moving to another worker when the leader's database session dies;
+- the event hub resuming after a killed Redis connection without dropping subscribers, ending
+  them when the stream lost its position, replaying for resuming clients, and shutting down promptly;
+- `LISTEN/NOTIFY` wake-ups for every way work becomes claimable, and recovery from a killed listener.
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs three jobs:
 - lint, including the hook tests and the alert-rule tests;
 - the full test suite with `-race`;
@@ -468,7 +501,7 @@ internal/
   store/postgres/  pgx store: notifications, work-queue operations, stats, templates
   ratelimit/       distributed rate limiter (GCRA slot reservation on Redis)
   provider/        provider HTTP client
-  events/          status events over Redis pub/sub, per-process hub
+  events/          status events: outbox relay to a Redis stream, per-process hub, replay
   metrics/         Prometheus collectors
   observability/   slog JSON with correlation IDs, OpenTelemetry setup
   config/          environment configuration

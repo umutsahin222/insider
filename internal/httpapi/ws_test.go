@@ -22,7 +22,7 @@ import (
 func wsServer(t *testing.T) (*httptest.Server, *fakeStore, *events.Hub) {
 	t.Helper()
 	store := newFakeStore()
-	hub := events.NewHub(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hub := events.NewHub(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	deps := testDeps(store, nil)
 	deps.Stream = hub
 	srv := httptest.NewServer(NewRouter(deps))
@@ -83,7 +83,7 @@ func (s racingStream) Subscribe(match func(domain.StatusEvent) bool, buffer int)
 
 func TestWS_SnapshotIsReadAfterSubscribing(t *testing.T) {
 	store := newFakeStore()
-	hub := events.NewHub(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	hub := events.NewHub(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	deps := testDeps(store, nil)
 	var id uuid.UUID
 	deps.Stream = racingStream{EventStream: hub, onSubscribe: func() {
@@ -108,17 +108,23 @@ func TestWS_NotificationSnapshotThenLiveEvents(t *testing.T) {
 	h := srv.Config.Handler
 	created := decode[notificationResponse](t, do(t, h, http.MethodPost, "/v1/notifications", validBody))
 	n := store.byID[created.ID]
+	n.UpdatedAt = n.UpdatedAt.Add(-time.Minute) // the row reached its state a while ago
+	store.byID[created.ID] = n
 
 	conn := dial(t, srv, "notification_id="+created.ID.String())
-	if snap := readEvent(t, conn); snap.NotificationID != created.ID || snap.Status != domain.StatusPending {
+	snap := readEvent(t, conn)
+	if snap.NotificationID != created.ID || snap.Status != domain.StatusPending {
 		t.Fatalf("snapshot = %+v, want the current pending state", snap)
+	}
+	// Same clock as the stream's events (the change's database time), so clients can order both.
+	if !snap.OccurredAt.Equal(n.UpdatedAt) {
+		t.Errorf("snapshot occurred_at = %v, want the row's updated_at %v", snap.OccurredAt, n.UpdatedAt)
 	}
 	waitSubscribed(t, hub, 1)
 
 	hub.Dispatch(domain.StatusEvent{NotificationID: uuid.New(), Status: domain.StatusSent}) // someone else's
-	hub.Dispatch(n.Transitioned(domain.StatusProcessing, nil, time.Now()))
-	n.Attempts = 1
-	hub.Dispatch(n.Transitioned(domain.StatusSent, nil, time.Now()))
+	hub.Dispatch(domain.StatusEvent{NotificationID: n.ID, Status: domain.StatusProcessing, Attempts: 1, StreamID: "5-0"})
+	hub.Dispatch(domain.StatusEvent{NotificationID: n.ID, Status: domain.StatusSent, Attempts: 1, StreamID: "6-0"})
 
 	if ev := readEvent(t, conn); ev.Status != domain.StatusProcessing || ev.NotificationID != created.ID {
 		t.Errorf("first live event = %+v", ev)
@@ -161,7 +167,7 @@ func TestWS_DroppedSubscriptionClosesWithTryAgainLater(t *testing.T) {
 	readEvent(t, conn) // snapshot
 	waitSubscribed(t, hub, 1)
 
-	hub.DropAll() // e.g. Redis reconnect or API shutdown
+	hub.DropAll(events.DropResync) // e.g. a gap in the stream, or API shutdown
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -240,4 +246,92 @@ func statusOf(r *http.Response) any {
 		return nil
 	}
 	return r.StatusCode
+}
+
+// replayStream answers Replay from a fixed list (or with an error) and fans out live events
+// through a real hub.
+type replayStream struct {
+	*events.Hub
+	replay []domain.StatusEvent
+	err    error
+	after  string // what the handler asked for
+}
+
+func (s *replayStream) Replay(_ context.Context, after string, match func(domain.StatusEvent) bool) ([]domain.StatusEvent, error) {
+	s.after = after
+	if s.err != nil {
+		return nil, s.err
+	}
+	var out []domain.StatusEvent
+	for _, e := range s.replay {
+		if match(e) {
+			out = append(out, e)
+		}
+	}
+	return out, nil
+}
+
+func resumeServer(t *testing.T, stream *replayStream) (*httptest.Server, *fakeStore) {
+	t.Helper()
+	store := newFakeStore()
+	deps := testDeps(store, nil)
+	deps.Stream = stream
+	srv := httptest.NewServer(NewRouter(deps))
+	t.Cleanup(srv.Close)
+	return srv, store
+}
+
+func TestWS_ResumeSendsWhatWasMissedThenOnlyNewEvents(t *testing.T) {
+	stream := &replayStream{Hub: events.NewHub(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)}
+	srv, _ := resumeServer(t, stream)
+	id := decode[notificationResponse](t, do(t, srv.Config.Handler, http.MethodPost, "/v1/notifications", validBody)).ID
+	stream.replay = []domain.StatusEvent{
+		{NotificationID: id, Status: domain.StatusProcessing, Attempts: 1, StreamID: "10-0"},
+		{NotificationID: uuid.New(), Status: domain.StatusSent, Attempts: 1, StreamID: "11-0"}, // not ours
+		{NotificationID: id, Status: domain.StatusPending, Attempts: 1, StreamID: "12-0"},
+	}
+
+	conn := dial(t, srv, "notification_id="+id.String()+"&after=9-0")
+	if ev := readEvent(t, conn); ev.StreamID != "10-0" || ev.Status != domain.StatusProcessing {
+		t.Fatalf("first event = %+v, want the first missed one (no snapshot)", ev)
+	}
+	if ev := readEvent(t, conn); ev.StreamID != "12-0" {
+		t.Fatalf("second event = %+v, want the second missed one", ev)
+	}
+	if stream.after != "9-0" {
+		t.Errorf("replayed after %q, want 9-0", stream.after)
+	}
+
+	waitSubscribed(t, stream.Hub, 1)
+	// The hub may still deliver events the replay already covered: they are skipped.
+	stream.Dispatch(domain.StatusEvent{NotificationID: id, Status: domain.StatusPending, Attempts: 1, StreamID: "12-0"})
+	stream.Dispatch(domain.StatusEvent{NotificationID: id, Status: domain.StatusSent, Attempts: 2, StreamID: "13-0"})
+	if ev := readEvent(t, conn); ev.StreamID != "13-0" || ev.Status != domain.StatusSent {
+		t.Errorf("live event = %+v, want only the new one (13-0)", ev)
+	}
+}
+
+func TestWS_ResumeFallsBackToASnapshot(t *testing.T) {
+	stream := &replayStream{Hub: events.NewHub(nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil), err: events.ErrReplayUnavailable}
+	srv, _ := resumeServer(t, stream)
+	id := decode[notificationResponse](t, do(t, srv.Config.Handler, http.MethodPost, "/v1/notifications", validBody)).ID
+
+	conn := dial(t, srv, "notification_id="+id.String()+"&after=9-0")
+	if ev := readEvent(t, conn); ev.NotificationID != id || ev.Status != domain.StatusPending || ev.StreamID != "" {
+		t.Fatalf("first event = %+v, want a snapshot (no event_id) when the replay is unavailable", ev)
+	}
+	waitSubscribed(t, stream.Hub, 1)
+	stream.Dispatch(domain.StatusEvent{NotificationID: id, Status: domain.StatusProcessing, Attempts: 1, StreamID: "5-0"})
+	if ev := readEvent(t, conn); ev.StreamID != "5-0" {
+		t.Errorf("live event = %+v: after a snapshot nothing is skipped", ev)
+	}
+}
+
+func TestWS_RejectsAMalformedResumePosition(t *testing.T) {
+	srv, _, _ := wsServer(t)
+	id := decode[notificationResponse](t, do(t, srv.Config.Handler, http.MethodPost, "/v1/notifications", validBody)).ID
+	rec := do(t, srv.Config.Handler, http.MethodGet, "/v1/ws?notification_id="+id.String()+"&after=yesterday", "")
+	if p := decode[problem](t, rec); rec.Code != http.StatusBadRequest || len(p.Errors) != 1 || p.Errors[0].Field != "after" {
+		t.Errorf("status = %d, problem = %+v; want 400 on after", rec.Code, p)
+	}
 }

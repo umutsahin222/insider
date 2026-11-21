@@ -56,11 +56,7 @@ func (s *Store) listen(ctx context.Context, onReady func(domain.Channel)) (conne
 	// LISTEN binds to the session: take the connection out of the pool so no query borrows it,
 	// and close it when done instead of handing a listening session back.
 	conn := pooled.Hijack()
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = conn.Close(closeCtx)
-	}()
+	defer closeConn(conn)
 
 	if _, err := conn.Exec(ctx, "LISTEN "+readyChannel); err != nil {
 		return false, fmt.Errorf("listening on %s: %w", readyChannel, err)

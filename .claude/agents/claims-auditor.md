@@ -28,8 +28,8 @@ A scope: a diff range, `all`, or a path.
   endpoints, headers, make targets, file and directory paths, CLI commands.
 - **Numbers and limits.** Character limits, batch size, rate limit, timeouts, retry policy,
   ports. Compare with the constants and defaults in the code.
-- **Behaviour statements** in the present tense, e.g. "a malformed key returns 422" or "the
-  publisher never blocks". Find the code path that implements each one.
+- **Behaviour statements** in the present tense, e.g. "a malformed key returns 422" or "a lost
+  Redis connection does not end WebSocket streams". Find the code path that implements each one.
 
 ## Do not report
 - Historical narrative: "found by…", "was measured at…", dated results in

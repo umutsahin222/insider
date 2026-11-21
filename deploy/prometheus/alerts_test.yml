@@ -35,6 +35,38 @@ tests:
         alertname: NotificationsDeadLettered
         exp_alerts: []
 
+  # The outbox stops draining: its oldest event ages past 30 s and stays there for 2 minutes.
+  # Two API replicas export the same gauge.
+  - interval: 30s
+    input_series:
+      - series: 'notification_outbox_oldest_age_seconds{instance="api1"}'
+        values: '0 0 30+30x10'
+      - series: 'notification_outbox_oldest_age_seconds{instance="api2"}'
+        values: '0 0 30+30x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: StatusEventsNotRelayed
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: StatusEventsNotRelayed
+        exp_alerts:
+          - exp_labels: { severity: warning }
+            exp_annotations:
+              summary: "Status events have waited 3m 30s in the outbox"
+              description: >-
+                Check Redis and that some worker reports notification_outbox_relay_leader 1.
+                Events are kept and relayed in order once the relay recovers.
+
+  # A healthy relay keeps the oldest event young: never fires.
+  - interval: 30s
+    input_series:
+      - series: 'notification_outbox_oldest_age_seconds{instance="api1"}'
+        values: '0.1 0.2 0 0.3 0.1 0 0.2 0 0.1 0 0.2'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: StatusEventsNotRelayed
+        exp_alerts: []
+
   # Breaker open on any replica for a minute.
   - interval: 30s
     input_series:

@@ -16,6 +16,9 @@ import (
 // EventStream is the local fan-out of status events; implemented by events.Hub.
 type EventStream interface {
 	Subscribe(match func(domain.StatusEvent) bool, buffer int) *events.Subscription
+	// Replay returns the events after an event ID, or events.ErrReplayUnavailable when the
+	// stream cannot prove it still holds all of them.
+	Replay(ctx context.Context, after string, match func(domain.StatusEvent) bool) ([]domain.StatusEvent, error)
 }
 
 const (
@@ -30,26 +33,46 @@ const (
 // subscribeStatus streams status events for one notification or one batch:
 //
 //  1. subscribe to the hub first, then
-//  2. send a snapshot of the current state from the database, then
+//  2. send what the client missed: the events after `after` (its last event_id) if the
+//     stream still holds them all, otherwise a snapshot of the current state from the
+//     database, then
 //  3. forward live events.
 //
-// Subscribing before the snapshot leaves no gap: an event raced with the snapshot is
-// delivered twice at worst, and clients order events by attempts. If the subscription is
-// dropped (slow client, Redis reconnect, API shutdown) the socket closes with 1013
-// "try again later" and the client reconnects to get a fresh snapshot.
+// Subscribing first leaves no gap: an event raced with step 2 arrives twice at worst, and a
+// live event a replay already sent is skipped. If the subscription is dropped (slow client,
+// a gap in the stream, API shutdown) the socket closes with 1013 "try again later" and the
+// client reconnects, with `after` set to resume (ADR-012).
 func (a *api) subscribeStatus(w http.ResponseWriter, r *http.Request) {
 	match, buffer, snapshot, err := a.parseSubscription(r)
 	if err != nil {
 		a.writeError(w, r, err)
 		return
 	}
+	after := r.URL.Query().Get("after")
+	if after != "" && !events.ParseStreamID(after) {
+		a.writeError(w, r, &badRequestError{msg: "invalid query parameters",
+			fields: []domain.FieldError{{Field: "after", Message: "must be an event_id from this stream"}}})
+		return
+	}
 	sub := a.stream.Subscribe(match, buffer)
 	defer sub.Close()
 
-	initial, err := snapshot(r.Context())
-	if err != nil {
-		a.writeError(w, r, err)
-		return
+	var initial []domain.StatusEvent
+	replayed := false
+	if after != "" {
+		initial, err = a.stream.Replay(r.Context(), after, match)
+		replayed = err == nil
+	}
+	if !replayed {
+		if initial, err = snapshot(r.Context()); err != nil {
+			a.writeError(w, r, err)
+			return
+		}
+	}
+	// Live events up to the last one already sent are duplicates of the replay.
+	sentUpTo := after
+	if n := len(initial); replayed && n > 0 {
+		sentUpTo = initial[n-1].StreamID
 	}
 
 	// The server's read/write timeouts are meant for ordinary requests; a WebSocket lives
@@ -87,6 +110,9 @@ func (a *api) subscribeStatus(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				_ = conn.Close(websocket.StatusTryAgainLater, "subscription dropped; reconnect to resynchronise")
 				return
+			}
+			if replayed && !events.StreamIDAfter(ev.StreamID, sentUpTo) {
+				continue
 			}
 			if err := writeEvent(ctx, conn, ev); err != nil {
 				return
@@ -141,7 +167,7 @@ func (a *api) parseSubscription(r *http.Request) (func(domain.StatusEvent) bool,
 			if err != nil {
 				return nil, err
 			}
-			return []domain.StatusEvent{domain.EventOf(n, a.now())}, nil
+			return []domain.StatusEvent{domain.EventOf(n)}, nil
 		}
 		return match, wsBufferNotification, snapshot, nil
 	}
@@ -163,7 +189,6 @@ func (a *api) batchSnapshot(ctx context.Context, batchID uuid.UUID) ([]domain.St
 	var (
 		out []domain.StatusEvent
 		f   = domain.ListFilter{BatchID: &batchID, Limit: maxPageSize}
-		now = a.now()
 	)
 	for {
 		page, err := a.store.ListNotifications(ctx, f)
@@ -171,7 +196,7 @@ func (a *api) batchSnapshot(ctx context.Context, batchID uuid.UUID) ([]domain.St
 			return nil, err
 		}
 		for _, n := range page.Items {
-			out = append(out, domain.EventOf(n, now))
+			out = append(out, domain.EventOf(n))
 		}
 		if page.Next == nil {
 			return out, nil

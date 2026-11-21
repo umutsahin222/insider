@@ -16,6 +16,7 @@ import (
 
 	"github.com/umutsahin222/insider/internal/delivery"
 	"github.com/umutsahin222/insider/internal/domain"
+	"github.com/umutsahin222/insider/internal/events"
 )
 
 var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -81,6 +82,7 @@ func TestDeliveryMetrics(t *testing.T) {
 type fakeDepths struct {
 	calls  atomic.Int32
 	depths []domain.QueueDepth
+	outbox domain.OutboxBacklog
 	err    error
 }
 
@@ -89,14 +91,24 @@ func (f *fakeDepths) QueueDepths(context.Context) ([]domain.QueueDepth, error) {
 	return f.depths, f.err
 }
 
+func (f *fakeDepths) OutboxBacklog(context.Context) (domain.OutboxBacklog, error) {
+	return f.outbox, f.err
+}
+
 func TestQueueCollector(t *testing.T) {
 	src := &fakeDepths{depths: []domain.QueueDepth{
 		{Channel: domain.ChannelSMS, Priority: domain.PriorityHigh, Ready: 7, Delayed: 2, Processing: 3, OldestReadyAge: 4 * time.Second},
 		{Channel: domain.ChannelSMS, Priority: domain.PriorityLow, Ready: 1, OldestReadyAge: 9 * time.Second},
-	}}
+	}, outbox: domain.OutboxBacklog{Pending: 12, OldestAge: 1500 * time.Millisecond}}
 	c := NewQueueCollector(src, time.Second, time.Hour, discard)
 
 	expected := `
+# HELP notification_outbox_oldest_age_seconds How long the oldest unrelayed status event has waited (0 when none).
+# TYPE notification_outbox_oldest_age_seconds gauge
+notification_outbox_oldest_age_seconds 1.5
+# HELP notification_outbox_pending Status events recorded but not yet relayed to the event stream.
+# TYPE notification_outbox_pending gauge
+notification_outbox_pending 12
 # HELP notification_queue_oldest_ready_age_seconds How long the oldest due notification of a channel has been waiting (queue lag).
 # TYPE notification_queue_oldest_ready_age_seconds gauge
 notification_queue_oldest_ready_age_seconds{channel="email"} 0
@@ -107,7 +119,8 @@ notification_queue_oldest_ready_age_seconds{channel="sms"} 9
 notification_queue_stats_up 1
 `
 	if err := testutil.CollectAndCompare(c, strings.NewReader(expected),
-		"notification_queue_oldest_ready_age_seconds", "notification_queue_stats_up"); err != nil {
+		"notification_queue_oldest_ready_age_seconds", "notification_queue_stats_up",
+		"notification_outbox_pending", "notification_outbox_oldest_age_seconds"); err != nil {
 		t.Error(err)
 	}
 
@@ -117,6 +130,37 @@ notification_queue_stats_up 1
 	}
 	if calls := src.calls.Load(); calls != 1 {
 		t.Errorf("source queried %d times across scrapes, want 1 (cached)", calls)
+	}
+}
+
+func TestRelayAndHubMetrics(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	relay := NewRelayMetrics(reg)
+	relay.RelayLeading(true)
+	relay.EventsRelayed(3)
+	relay.EventsRelayed(2)
+	relay.RelayPublishFailed()
+	if got := testutil.ToFloat64(relay.leader); got != 1 {
+		t.Errorf("leader = %v, want 1", got)
+	}
+	relay.RelayLeading(false)
+	if got := testutil.ToFloat64(relay.leader); got != 0 {
+		t.Errorf("leader after resigning = %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(relay.relayed); got != 5 {
+		t.Errorf("relayed = %v, want 5", got)
+	}
+	if got := testutil.ToFloat64(relay.publishFailure); got != 1 {
+		t.Errorf("publish failures = %v, want 1", got)
+	}
+
+	httpm := NewHTTPMetrics(prometheus.NewRegistry())
+	if n := testutil.CollectAndCount(httpm.subscriberDrops); n != 3 {
+		t.Errorf("drop series before any drop = %d, want all 3 reasons at zero", n)
+	}
+	httpm.SubscriberDropped(events.DropResync)
+	if got := testutil.ToFloat64(httpm.subscriberDrops.WithLabelValues("resync")); got != 1 {
+		t.Errorf("drops{resync} = %v, want 1", got)
 	}
 }
 

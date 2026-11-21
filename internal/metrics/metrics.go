@@ -15,6 +15,7 @@ import (
 
 	"github.com/umutsahin222/insider/internal/delivery"
 	"github.com/umutsahin222/insider/internal/domain"
+	"github.com/umutsahin222/insider/internal/events"
 )
 
 // Metric names and labels are documented in ADR-007. Label values come from closed sets
@@ -33,13 +34,16 @@ func MetricsHandler(reg *prometheus.Registry) http.Handler {
 	return promhttp.HandlerFor(reg, promhttp.HandlerOpts{Registry: reg})
 }
 
-// HTTPMetrics instruments the HTTP API; it implements httpapi.Metrics.
+// HTTPMetrics instruments the HTTP API; it implements httpapi.Metrics and events.HubMetrics.
 type HTTPMetrics struct {
-	requests  *prometheus.CounterVec
-	duration  *prometheus.HistogramVec
-	accepted  *prometheus.CounterVec
-	websocket prometheus.Gauge
+	requests        *prometheus.CounterVec
+	duration        *prometheus.HistogramVec
+	accepted        *prometheus.CounterVec
+	websocket       prometheus.Gauge
+	subscriberDrops *prometheus.CounterVec
 }
+
+var _ events.HubMetrics = (*HTTPMetrics)(nil)
 
 // NewHTTPMetrics registers the HTTP API metrics with reg.
 func NewHTTPMetrics(reg prometheus.Registerer) *HTTPMetrics {
@@ -61,9 +65,21 @@ func NewHTTPMetrics(reg prometheus.Registerer) *HTTPMetrics {
 			Name: "websocket_connections",
 			Help: "Open WebSocket status streams.",
 		}),
+		subscriberDrops: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "notification_event_subscribers_dropped_total",
+			Help: "Status event subscriptions (WebSocket streams) ended by the API so the client resynchronises, by reason.",
+		}, []string{"reason"}),
 	}
-	reg.MustRegister(m.requests, m.duration, m.accepted, m.websocket)
+	for _, r := range []events.DropReason{events.DropSlowConsumer, events.DropResync, events.DropShutdown} {
+		m.subscriberDrops.WithLabelValues(string(r)) // export zeros, so rate() works from the start
+	}
+	reg.MustRegister(m.requests, m.duration, m.accepted, m.websocket, m.subscriberDrops)
 	return m
+}
+
+// SubscriberDropped counts a subscription the event hub ended.
+func (m *HTTPMetrics) SubscriberDropped(r events.DropReason) {
+	m.subscriberDrops.WithLabelValues(string(r)).Inc()
 }
 
 // WebSocketConnections tracks open status streams.
@@ -156,31 +172,80 @@ func (m *DeliveryMetrics) BreakerStateChanged(ch domain.Channel, s delivery.Brea
 
 func (m *DeliveryMetrics) Reclaimed(n int) { m.reclaimed.Add(float64(n)) }
 
-// QueueDepthSource reports the current backlog; implemented by store/postgres.
-type QueueDepthSource interface {
-	QueueDepths(ctx context.Context) ([]domain.QueueDepth, error)
+// RelayMetrics instruments the status event relay (ADR-012); it implements events.RelayMetrics.
+type RelayMetrics struct {
+	leader         prometheus.Gauge
+	relayed        prometheus.Counter
+	publishFailure prometheus.Counter
 }
 
-// QueueCollector exports queue depth as gauges, read from the database at scrape time so
-// the value is current, not a periodic snapshot. Results are cached for minInterval so
-// several scrapers (or API replicas behind one Prometheus job) cannot hammer the database.
+var _ events.RelayMetrics = (*RelayMetrics)(nil)
+
+// NewRelayMetrics registers the relay metrics with reg.
+func NewRelayMetrics(reg prometheus.Registerer) *RelayMetrics {
+	m := &RelayMetrics{
+		leader: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "notification_outbox_relay_leader",
+			Help: "1 while this worker process is the one relaying status events from the outbox.",
+		}),
+		relayed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "notification_status_events_relayed_total",
+			Help: "Status events moved from the outbox to the event stream.",
+		}),
+		publishFailure: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "notification_outbox_relay_publish_failures_total",
+			Help: "Rounds in which the relay could not append to the event stream (events stay in the outbox).",
+		}),
+	}
+	reg.MustRegister(m.leader, m.relayed, m.publishFailure)
+	return m
+}
+
+func (m *RelayMetrics) RelayLeading(leading bool) {
+	if leading {
+		m.leader.Set(1)
+	} else {
+		m.leader.Set(0)
+	}
+}
+
+func (m *RelayMetrics) EventsRelayed(n int) { m.relayed.Add(float64(n)) }
+
+func (m *RelayMetrics) RelayPublishFailed() { m.publishFailure.Inc() }
+
+// BacklogSource reports the work queue and the status event outbox; implemented by
+// store/postgres.
+type BacklogSource interface {
+	QueueDepths(ctx context.Context) ([]domain.QueueDepth, error)
+	OutboxBacklog(ctx context.Context) (domain.OutboxBacklog, error)
+}
+
+// QueueCollector exports the queue depth and the outbox backlog as gauges, read from the
+// database at scrape time so the values are current, not periodic snapshots. Results are
+// cached for minInterval so several scrapers (or API replicas behind one Prometheus job)
+// cannot hammer the database.
 type QueueCollector struct {
-	src         QueueDepthSource
+	src         BacklogSource
 	timeout     time.Duration
 	minInterval time.Duration
 	log         *slog.Logger
 
-	depth, oldest, up *prometheus.Desc
+	depth, oldest, outboxPending, outboxOldest, up *prometheus.Desc
 
 	mu      sync.Mutex
-	last    []domain.QueueDepth
+	last    backlog
 	lastErr error
 	lastAt  time.Time
 	now     func() time.Time
 }
 
+type backlog struct {
+	depths []domain.QueueDepth
+	outbox domain.OutboxBacklog
+}
+
 // NewQueueCollector returns a collector querying src with the given timeout per scrape.
-func NewQueueCollector(src QueueDepthSource, timeout, minInterval time.Duration, log *slog.Logger) *QueueCollector {
+func NewQueueCollector(src BacklogSource, timeout, minInterval time.Duration, log *slog.Logger) *QueueCollector {
 	return &QueueCollector{
 		src: src, timeout: timeout, minInterval: minInterval, log: log, now: time.Now,
 		depth: prometheus.NewDesc("notification_queue_depth",
@@ -189,6 +254,10 @@ func NewQueueCollector(src QueueDepthSource, timeout, minInterval time.Duration,
 		oldest: prometheus.NewDesc("notification_queue_oldest_ready_age_seconds",
 			"How long the oldest due notification of a channel has been waiting (queue lag).",
 			[]string{"channel"}, nil),
+		outboxPending: prometheus.NewDesc("notification_outbox_pending",
+			"Status events recorded but not yet relayed to the event stream.", nil, nil),
+		outboxOldest: prometheus.NewDesc("notification_outbox_oldest_age_seconds",
+			"How long the oldest unrelayed status event has waited (0 when none).", nil, nil),
 		up: prometheus.NewDesc("notification_queue_stats_up",
 			"1 if the last queue statistics query succeeded, 0 otherwise.", nil, nil),
 	}
@@ -198,26 +267,30 @@ func NewQueueCollector(src QueueDepthSource, timeout, minInterval time.Duration,
 func (c *QueueCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.depth
 	ch <- c.oldest
+	ch <- c.outboxPending
+	ch <- c.outboxOldest
 	ch <- c.up
 }
 
 // Collect implements prometheus.Collector. Every channel/priority/state combination is
 // always exported, with zeros for empty queues, so series never vanish from graphs.
 func (c *QueueCollector) Collect(ch chan<- prometheus.Metric) {
-	depths, err := c.read()
+	b, err := c.read()
 	if err != nil {
 		ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 0)
 		return
 	}
 	ch <- prometheus.MustNewConstMetric(c.up, prometheus.GaugeValue, 1)
+	ch <- prometheus.MustNewConstMetric(c.outboxPending, prometheus.GaugeValue, float64(b.outbox.Pending))
+	ch <- prometheus.MustNewConstMetric(c.outboxOldest, prometheus.GaugeValue, b.outbox.OldestAge.Seconds())
 
 	type key struct {
 		ch domain.Channel
 		p  domain.Priority
 	}
-	byKey := make(map[key]domain.QueueDepth, len(depths))
+	byKey := make(map[key]domain.QueueDepth, len(b.depths))
 	oldest := map[domain.Channel]time.Duration{}
-	for _, d := range depths {
+	for _, d := range b.depths {
 		byKey[key{d.Channel, d.Priority}] = d
 		oldest[d.Channel] = max(oldest[d.Channel], d.OldestReadyAge)
 	}
@@ -232,7 +305,7 @@ func (c *QueueCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 }
 
-func (c *QueueCollector) read() ([]domain.QueueDepth, error) {
+func (c *QueueCollector) read() (backlog, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !c.lastAt.IsZero() && c.now().Sub(c.lastAt) < c.minInterval {
@@ -240,10 +313,14 @@ func (c *QueueCollector) read() ([]domain.QueueDepth, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
 	defer cancel()
-	c.last, c.lastErr = c.src.QueueDepths(ctx)
-	c.lastAt = c.now()
-	if c.lastErr != nil {
-		c.log.Warn("queue depth query failed", "error", c.lastErr)
+	var b backlog
+	var err error
+	if b.depths, err = c.src.QueueDepths(ctx); err == nil {
+		b.outbox, err = c.src.OutboxBacklog(ctx)
+	}
+	c.last, c.lastErr, c.lastAt = b, err, c.now()
+	if err != nil {
+		c.log.Warn("queue statistics query failed", "error", err)
 	}
 	return c.last, c.lastErr
 }

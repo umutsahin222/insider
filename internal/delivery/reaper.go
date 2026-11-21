@@ -15,14 +15,11 @@ type LeaseReaper interface {
 }
 
 // RunReaper periodically reclaims notifications whose worker crashed or stalled past its
-// lease. It is safe to run in every worker replica: the UPDATE is idempotent.
-// Nil m and ev disable metrics and events.
-func RunReaper(ctx context.Context, r LeaseReaper, interval time.Duration, m Metrics, ev Events, log *slog.Logger) {
+// lease. It is safe to run in every worker replica: the UPDATE is idempotent. The database
+// records the status events of what it reclaims (ADR-012). A nil m disables metrics.
+func RunReaper(ctx context.Context, r LeaseReaper, interval time.Duration, m Metrics, log *slog.Logger) {
 	if m == nil {
 		m = NopMetrics{}
-	}
-	if ev == nil {
-		ev = NopEvents{}
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -37,12 +34,6 @@ func RunReaper(ctx context.Context, r LeaseReaper, interval time.Duration, m Met
 				log.Error("reaping expired leases failed", "error", err)
 			case len(reaped) > 0:
 				m.Reclaimed(len(reaped))
-				now := time.Now()
-				evs := make([]domain.StatusEvent, len(reaped))
-				for i, n := range reaped {
-					evs[i] = domain.EventOf(n, now)
-				}
-				ev.Publish(ctx, evs...)
 				log.Warn("reclaimed notifications with expired leases", "count", len(reaped))
 			}
 		}

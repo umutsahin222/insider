@@ -28,6 +28,13 @@ import (
 	"github.com/umutsahin222/insider/internal/store/postgres"
 )
 
+const (
+	// relayPollInterval bounds how long a status event waits in the outbox when the relay is
+	// idle; relayBatchSize is how many it moves per round.
+	relayPollInterval = 100 * time.Millisecond
+	relayBatchSize    = 500
+)
+
 func main() {
 	if err := run(); err != nil {
 		slog.Error("worker exited", "error", err)
@@ -72,8 +79,6 @@ func run() error {
 	rdb := redis.NewClient(redisOpts)
 	defer func() { _ = rdb.Close() }()
 
-	publisher := events.NewPublisher(rdb, log.With("component", "events"))
-	defer closePublisher(publisher, log) // runs before rdb.Close: workers are done publishing
 	reg := metrics.NewRegistry()
 	deliveryMetrics := metrics.NewDeliveryMetrics(reg)
 	limiter := ratelimit.New(rdb, cfg.RateLimitPerSecond, cfg.RateLimitBurst, cfg.RateLimitMargin)
@@ -128,13 +133,19 @@ func run() error {
 		}
 		w := delivery.NewWorker(wcfg, delivery.Deps{
 			Queue: store, Sender: sender, Limiter: limiter,
-			Metrics: deliveryMetrics, Events: publisher, Tracing: tracing, Logger: log, Wake: wake[ch],
+			Metrics: deliveryMetrics, Tracing: tracing, Logger: log, Wake: wake[ch],
 		})
 		wg.Go(func() { w.Run(ctx) })
 	}
 	wg.Go(func() {
-		delivery.RunReaper(ctx, store, cfg.ReaperInterval, deliveryMetrics, publisher, log.With("component", "reaper"))
+		delivery.RunReaper(ctx, store, cfg.ReaperInterval, deliveryMetrics, log.With("component", "reaper"))
 	})
+	// Every worker process runs a relay; an advisory lock lets one of them move status events
+	// from the outbox to the event stream at a time (ADR-012).
+	relay := events.NewRelay(store.NewOutboxRelay(), rdb,
+		events.RelayConfig{MaxLen: cfg.EventStreamMaxLen, PollInterval: relayPollInterval, BatchSize: relayBatchSize},
+		metrics.NewRelayMetrics(reg), log.With("component", "relay"))
+	wg.Go(func() { relay.Run(ctx) })
 
 	log.Info("worker running", "channels", cfg.Channels, "provider_url", cfg.ProviderURL,
 		"rate_limit_per_second", cfg.RateLimitPerSecond, "ops_addr", cfg.HTTPAddr,
@@ -193,15 +204,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
-}
-
-// closePublisher sends the status events still queued before exit.
-func closePublisher(p *events.Publisher, log *slog.Logger) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := p.Close(ctx); err != nil {
-		log.Warn("closing event publisher", "error", err)
-	}
 }
 
 // flushTraces exports buffered spans before exit.

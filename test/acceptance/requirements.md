@@ -25,7 +25,7 @@ Jaeger, container logs), and where the design is recorded. Unit and integration 
 | BONUS-FAIL | Failure handling | `TestREQ_BONUS_DeadLetterAndManualRetry`, `TestREQ_DEL_RetriesAreAudited` | ADR-002, ADR-005 |
 | BONUS-SCHED | Scheduled notifications | `TestREQ_BONUS_ScheduledNotifications` | ADR-001 |
 | BONUS-TPL | Template system with variable substitution | `TestREQ_BONUS_Templates` | ADR-009 |
-| BONUS-WS | Real-time status updates via WebSocket | `TestREQ_BONUS_WebSocket` | ADR-008 |
+| BONUS-WS | Real-time status updates via WebSocket | `TestREQ_BONUS_WebSocket`, `TestREQ_BONUS_WebSocketResume` | ADR-008, ADR-012 |
 | BONUS-TRACE | Distributed tracing | `TestREQ_BONUS_DistributedTracing` | ADR-007 |
 | BONUS-CI | GitHub Actions CI/CD: automated testing and linting | `.github/workflows/ci.yml` (lint, tests with `-race`, compose e2e with smoke and this suite) | ADR-010 |
 | DELIV-1 | Source code with clean commit history | Conventional Commits, one logical change each | `docs/ai-workflow.md` |

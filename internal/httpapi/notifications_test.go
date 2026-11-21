@@ -639,47 +639,6 @@ func TestRouting(t *testing.T) {
 	}
 }
 
-type recordingEvents struct {
-	mu  sync.Mutex
-	evs []domain.StatusEvent
-}
-
-func (r *recordingEvents) Publish(_ context.Context, evs ...domain.StatusEvent) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.evs = append(r.evs, evs...)
-}
-
-func TestEvents_CancelAndRetryArePublished(t *testing.T) {
-	store, ev := newFakeStore(), &recordingEvents{}
-	deps := testDeps(store, nil)
-	deps.Events = ev
-	h := NewRouter(deps)
-
-	created := decode[notificationResponse](t, do(t, h, http.MethodPost, "/v1/notifications", validBody))
-	do(t, h, http.MethodPost, "/v1/notifications/"+created.ID.String()+"/cancel", "")
-
-	batch := decode[batchCreatedResponse](t, do(t, h, http.MethodPost, "/v1/notifications/batch", `{"items":[`+validBody+`,`+validBody+`]}`))
-	do(t, h, http.MethodPost, "/v1/batches/"+batch.BatchID.String()+"/cancel", "")
-
-	failed := decode[notificationResponse](t, do(t, h, http.MethodPost, "/v1/notifications", validBody))
-	n := store.byID[failed.ID]
-	n.Status = domain.StatusFailed
-	store.byID[failed.ID] = n
-	do(t, h, http.MethodPost, "/v1/notifications/"+failed.ID.String()+"/retry", "")
-
-	var got []string
-	for _, e := range ev.evs {
-		got = append(got, string(e.Status))
-	}
-	if strings.Join(got, ",") != "cancelled,cancelled,cancelled,pending" {
-		t.Errorf("events = %v, want 3 cancellations and 1 re-queue", got)
-	}
-	if ev.evs[0].NotificationID != created.ID {
-		t.Errorf("first event is for %s, want %s", ev.evs[0].NotificationID, created.ID)
-	}
-}
-
 // Every Notification property is required in api/openapi.yaml (nullable ones are null when
 // unset), so the response must always carry all of them.
 func TestNotificationResponse_AlwaysHasEveryContractField(t *testing.T) {

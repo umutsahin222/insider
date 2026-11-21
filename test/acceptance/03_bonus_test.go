@@ -114,6 +114,77 @@ func TestREQ_BONUS_WebSocket(t *testing.T) {
 	}
 }
 
+// REQ-BONUS-WS (resume): a client that disconnects and reconnects with the last event_id it
+// received gets exactly what it missed, without a snapshot, and sees every notification
+// through to the end (ADR-012).
+func TestREQ_BONUS_WebSocketResume(t *testing.T) {
+	items := make([]map[string]any, 20)
+	for i := range items {
+		items[i] = map[string]any{"channel": "push", "recipient": fmt.Sprintf("resume-%d", i), "content": run + " resume",
+			"scheduled_at": iso(time.Now().Add(3 * time.Second))}
+	}
+	id, ids := batch(t, items)
+
+	type event struct {
+		EventID        *string `json:"event_id"`
+		NotificationID string  `json:"notification_id"`
+		Status         string  `json:"status"`
+	}
+	read := func(ctx context.Context, conn *websocket.Conn) event {
+		t.Helper()
+		_, raw, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		var e event
+		if err := json.Unmarshal(raw, &e); err != nil {
+			t.Fatalf("decode %s: %v", raw, err)
+		}
+		return e
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	url := "ws" + strings.TrimPrefix(apiURL, "http") + "/v1/ws?batch_id=" + id
+
+	// First session: the snapshot, then live events until the first processing one.
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	sent := map[string]bool{}
+	var last string
+	for last == "" {
+		e := read(ctx, conn)
+		if e.Status == "sent" {
+			sent[e.NotificationID] = true
+		}
+		if e.EventID != nil && e.Status == "processing" {
+			last = *e.EventID
+		}
+	}
+	_ = conn.Close(websocket.StatusNormalClosure, "going away for a while")
+	time.Sleep(2 * time.Second) // deliveries continue while the client is away
+
+	// Second session: resume after the last event seen.
+	conn, _, err = websocket.Dial(ctx, url+"&after="+last, nil)
+	if err != nil {
+		t.Fatalf("dial with after: %v", err)
+	}
+	defer func() { _ = conn.CloseNow() }()
+	resumed := 0
+	for len(sent) < len(ids) {
+		e := read(ctx, conn)
+		resumed++
+		if e.EventID == nil {
+			t.Fatalf("event %d after resuming has no event_id: got a snapshot, want the missed events", resumed)
+		}
+		if e.Status == "sent" {
+			sent[e.NotificationID] = true
+		}
+	}
+	t.Logf("resumed after %s: %d events, all %d notifications sent", last, resumed, len(ids))
+}
+
 // REQ-BONUS-TRACING: one distributed trace spans the API request, the worker's attempt and the
 // provider call.
 func TestREQ_BONUS_DistributedTracing(t *testing.T) {

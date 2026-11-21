@@ -35,16 +35,6 @@ type NotificationStore interface {
 // Check reports whether a dependency is healthy; used by /readyz.
 type Check func(ctx context.Context) error
 
-// Events publishes status changes caused by API calls (cancel, retry); implemented by
-// events.Publisher. Best-effort: it never fails a request.
-type Events interface {
-	Publish(ctx context.Context, evs ...domain.StatusEvent)
-}
-
-type nopEvents struct{}
-
-func (nopEvents) Publish(context.Context, ...domain.StatusEvent) {}
-
 // Metrics receives API measurements; implemented by metrics.HTTPMetrics.
 type Metrics interface {
 	// ObserveRequest records one request; route is the matched pattern, not the raw path.
@@ -76,8 +66,6 @@ type Deps struct {
 	MetricsHandler http.Handler
 	// Stats, if set, serves GET /v1/stats.
 	Stats StatsStore
-	// Events announces cancellations and manual retries; nil publishes nothing.
-	Events Events
 	// Stream, if set, serves GET /v1/ws (live status over WebSocket).
 	Stream EventStream
 	// WebSocketOrigins are extra browser origins allowed to open /v1/ws (same-origin and
@@ -103,7 +91,6 @@ type api struct {
 	now        func() time.Time
 	metrics    Metrics
 	stats      StatsStore
-	events     Events
 	stream     EventStream
 	wsOrigins  []string
 	propagator propagation.TextMapPropagator
@@ -117,10 +104,6 @@ func NewRouter(d Deps) http.Handler {
 	}
 	if a.metrics == nil {
 		a.metrics = nopMetrics{}
-	}
-	a.events = d.Events
-	if a.events == nil {
-		a.events = nopEvents{}
 	}
 	a.stream, a.wsOrigins = d.Stream, d.WebSocketOrigins
 	tracing := d.Tracing

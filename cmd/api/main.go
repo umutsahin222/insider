@@ -72,18 +72,19 @@ func run() error {
 	rdb := redis.NewClient(redisOpts)
 	defer func() { _ = rdb.Close() }()
 
-	// Queue depth is exported by the API (not the workers), read from the database at scrape
-	// time with a short cache; see ADR-007.
+	// Queue depth and the status event outbox backlog are exported by the API (not the
+	// workers), read from the database at scrape time with a short cache; see ADR-007.
 	reg := metrics.NewRegistry()
 	reg.MustRegister(metrics.NewQueueCollector(store, queueStatsTimeout, queueStatsCache, log.With("component", "queue_metrics")))
+	httpMetrics := metrics.NewHTTPMetrics(reg)
 
-	// One Redis subscription per process fans status events out to WebSocket clients. It
-	// stops with ctx (on SIGTERM), which closes every stream with "try again later".
-	hub := events.NewHub(rdb, log.With("component", "event_hub"))
-	go hub.Run(ctx)
-
-	publisher := events.NewPublisher(rdb, log.With("component", "events"))
-	defer closePublisher(publisher, log) // after the HTTP server: in-flight requests may publish
+	// One reader of the event stream per process fans status events out to WebSocket clients
+	// (ADR-012). It stops with ctx (on SIGTERM), which closes every stream with "try again
+	// later". The API publishes no events: the database records them with every transition.
+	hub := events.NewHub(redisOpts, log.With("component", "event_hub"), httpMetrics)
+	hubDone := make(chan struct{})
+	go func() { hub.Run(ctx); close(hubDone) }()
+	defer func() { <-hubDone; _ = hub.Close() }()
 
 	handler := httpapi.NewRouter(httpapi.Deps{
 		Store:  store,
@@ -93,10 +94,9 @@ func run() error {
 			"postgres": store.Ping,
 			"redis":    func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 		},
-		Metrics:          metrics.NewHTTPMetrics(reg),
+		Metrics:          httpMetrics,
 		MetricsHandler:   metrics.MetricsHandler(reg),
 		Stats:            store,
-		Events:           publisher,
 		Stream:           hub,
 		WebSocketOrigins: cfg.WebSocketOrigins,
 		Tracing:          tracing,
@@ -134,15 +134,6 @@ func run() error {
 		return fmt.Errorf("shutting down: %w", err)
 	}
 	return nil
-}
-
-// closePublisher sends the status events still queued before exit.
-func closePublisher(p *events.Publisher, log *slog.Logger) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := p.Close(ctx); err != nil {
-		log.Warn("closing event publisher", "error", err)
-	}
 }
 
 // flushTraces exports buffered spans before exit.

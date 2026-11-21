@@ -342,14 +342,20 @@ paths:
         notification or batch. Exactly one of `notification_id` / `batch_id` is required;
         both are checked before upgrading (`400` / `404`).
 
-        1. On connect the server sends a **snapshot**: one event per notification with its
-           current state (a batch sends one per item).
-        2. Then it forwards **live events** (`processing`, `sent`, `pending` after a failed
-           attempt or a release, `failed`, `cancelled`). An event can repeat a snapshot state;
-           order events of one notification by `attempts`.
-        3. If the server cannot guarantee completeness — the client fell behind, the API lost
-           its Redis subscription, or the API is shutting down — it closes with status
-           **1013 (Try Again Later)**. Reconnect to receive a fresh snapshot.
+        1. On connect the server sends what the client is missing:
+           - with `after` (the last `event_id` the client received), every event after it,
+             if the server can prove it still has all of them;
+           - otherwise a **snapshot**: one event per notification with its current state (a
+             batch sends one per item). Snapshot events have `event_id: null`.
+        2. Then it forwards **live events** (`pending` when created or re-queued,
+           `processing`, `sent`, `failed`, `cancelled`). Events of one notification arrive in
+           the order they happened. Delivery is at least once, so an event can arrive twice,
+           and a live event can precede the snapshot: one whose `occurred_at` is older than the
+           snapshot's is already reflected in it.
+        3. If the server cannot guarantee completeness — the client fell behind, the event
+           stream lost events, or the API is shutting down — it closes with status
+           **1013 (Try Again Later)**. Reconnect with `after` set to the last `event_id`
+           received; the server answers with the missed events or, if it cannot, a snapshot.
 
         The server never expects client messages and pings every 30 s. Browser clients from
         other origins must be allowed via `WS_ALLOWED_ORIGINS`. Example:
@@ -361,6 +367,10 @@ paths:
         - name: batch_id
           in: query
           schema: { type: string, format: uuid }
+        - name: after
+          in: query
+          description: Resume after this `event_id` (from an earlier stream) instead of starting with a snapshot.
+          schema: { type: string, pattern: '^[0-9]+-[0-9]+$', example: '1763553600000-0' }
       responses:
         '101':
           description: Switching protocols; messages are `StatusEvent` objects.
@@ -818,16 +828,24 @@ components:
     StatusEvent:
       type: object
       description: |
-        A notification reached `status`. `error` explains a failed attempt (`pending` after a
-        retryable failure, or `failed`). Published best-effort; the database stays the truth.
-      required: [notification_id, batch_id, status, attempts, error, occurred_at]
+        A notification reached `status`. The database records one with every status change,
+        in the same transaction. `error` is the notification's last error at that point (why an
+        attempt failed).
+      required: [event_id, notification_id, batch_id, status, attempts, error, occurred_at]
       properties:
+        event_id:
+          type: [string, 'null']
+          description: Position in the event stream; pass it as `after` to resume. `null` for snapshot events.
+          example: '1763553600000-0'
         notification_id: { type: string, format: uuid }
         batch_id: { type: [string, 'null'], format: uuid }
         status: { $ref: '#/components/schemas/Status' }
         attempts: { type: integer }
         error: { type: [string, 'null'] }
-        occurred_at: { type: string, format: date-time }
+        occurred_at:
+          type: string
+          format: date-time
+          description: Database time of the change; for a snapshot event, when the notification reached its current state.
 
     Health:
       type: object

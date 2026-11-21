@@ -33,7 +33,10 @@ worker.
   `notification_queue_stats_up`. The database is the only place that knows the true backlog across
   replicas; a periodic snapshot would be stale, so the collector queries on scrape, cached for 1 s
   so several scrapers can't hammer Postgres, and zero-fills every series so none vanish from graphs.
-  All labels come from closed sets; cardinality is fixed (27 depth series).
+  All labels come from closed sets; cardinality is fixed (27 depth series). Since ADR-012 the same
+  collector exports the status event outbox (`notification_outbox_pending`,
+  `notification_outbox_oldest_age_seconds`); the relay leader, its throughput and failures are
+  worker metrics, and dropped WebSocket subscriptions are counted by reason on the API.
 
 ### `GET /v1/stats`
 Prometheus gives rates only through PromQL. `GET /v1/stats?window=5m` answers the brief's question

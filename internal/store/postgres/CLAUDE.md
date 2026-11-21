@@ -17,6 +17,11 @@ Postgres is the source of truth and the work queue (ADR-001). Invariants for thi
 - Triggers on `notifications` (migration 000006) `NOTIFY notifications_ready` when rows become
   pending and due now; `ListenForReadyWork` relays them to the workers (ADR-011). A new way of
   making work claimable needs no Go change, but add a case to `listen_integration_test.go`.
+- Triggers on `notifications` (migration 000007) write a `status_event_outbox` row for every
+  insert and status change, in the same statement (ADR-012). Never write events from Go and
+  never bypass `notifications` for status changes; a new transition gets a case in
+  `outbox_integration_test.go`. `OutboxRelay` reads and deletes only on its leader session, and
+  deletes exact ids, never a range.
 - Queries are parameterised (`$n`) only. Dynamic SQL may join fixed fragments, never values.
 - Schema changes go into a **new** migration (`migrations/`); a hook blocks edits to committed ones.
 - Changes here need an integration test (`//go:build integration`, testcontainers).

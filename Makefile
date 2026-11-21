@@ -70,11 +70,12 @@ lint-alerts:
 	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR)/deploy/prometheus:/rules" -w /rules --entrypoint promtool prom/prometheus:$(PROMETHEUS_VERSION) check rules alerts.yml
 	MSYS_NO_PATHCONV=1 docker run --rm -v "$(CURDIR)/deploy/prometheus:/rules" -w /rules --entrypoint promtool prom/prometheus:$(PROMETHEUS_VERSION) test rules alerts_test.yml
 
+# MSYS_NO_PATHCONV stops Git Bash rewriting -path=/migrations into a Windows path.
 migrate-up:
-	docker compose run --rm migrate -path=/migrations -database "$(COMPOSE_DB_URL)" up
+	MSYS_NO_PATHCONV=1 docker compose run --rm migrate -path=/migrations -database "$(COMPOSE_DB_URL)" up
 
 migrate-down:
-	docker compose run --rm migrate -path=/migrations -database "$(COMPOSE_DB_URL)" down 1
+	MSYS_NO_PATHCONV=1 docker compose run --rm migrate -path=/migrations -database "$(COMPOSE_DB_URL)" down 1
 
 tidy:
 	go mod tidy

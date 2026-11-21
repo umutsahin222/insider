@@ -69,7 +69,7 @@ make down                                # stop and delete volumes
 | Cancel pending | `POST /v1/notifications/{id}/cancel`, `POST /v1/batches/{id}/cancel`; conditional UPDATE, `409` if no longer pending | |
 | List with filters and pagination | `GET /v1/notifications?status=&channel=&batch_id=&from=&to=&limit=&cursor=`, keyset pagination | |
 | Asynchronous queue workers | Postgres is the queue: `FOR UPDATE SKIP LOCKED` claims, leases, a reaper | [ADR-001](docs/adr/001-postgres-as-queue.md), [ADR-005](docs/adr/005-lease-fencing-and-db-clock.md) |
-| 100 msg/s per channel | GCRA slot reservation in Redis Lua, shared by all worker replicas: never more than 100 sends in any 1-second window | [ADR-003](docs/adr/003-rate-limiting.md) |
+| 100 msg/s per channel | GCRA slot reservation in Redis Lua, shared by all worker replicas: never more than 100 sends in any 1-second window, with a 50 ms margin so the provider never sees more either (about 95/s sustained) | [ADR-003](docs/adr/003-rate-limiting.md) |
 | Priority queue | Claims order by `priority, next_attempt_at` | ADR-001 |
 | Content validation | E.164 phone numbers, email addresses, push tokens; SMS measured in segments (160 GSM-7 or 70 UCS-2 characters each), 10 000 characters for email, 256 for push; all errors reported at once | [`validation.go`](internal/domain/validation.go), [`sms.go`](internal/domain/sms.go) |
 | Idempotency | `Idempotency-Key` on single and batch creates; replay returns `200`, reuse with a different body returns `422` | [ADR-006](docs/adr/006-idempotency-fingerprints-and-batch-keys.md) |
@@ -360,7 +360,7 @@ at once and the binary refuses to start.
 | `MAX_BATCH_SIZE`, `MAX_ATTEMPTS`, `MAX_SCHEDULE_AHEAD` | `1000`, `5`, `720h` | API |
 | `WS_ALLOWED_ORIGINS` | empty (same origin only) | API |
 | `PROVIDER_URL`, `PROVIDER_TIMEOUT` | mock provider, `5s` | worker |
-| `RATE_LIMIT_PER_SECOND`, `RATE_LIMIT_BURST` | `100`, `1` | worker |
+| `RATE_LIMIT_PER_SECOND`, `RATE_LIMIT_BURST`, `RATE_LIMIT_MARGIN` | `100`, `1`, `50ms` | worker |
 | `CHANNELS`, `WORKER_CONCURRENCY`, `CLAIM_BATCH_SIZE` | all, `8`, `2` | worker |
 | `LEASE_DURATION`, `REAPER_INTERVAL`, `POLL_INTERVAL` | `60s`, `10s`, `1s` | worker |
 | `RETRY_BASE`, `RETRY_MAX` | `2s`, `5m` | worker |
@@ -419,7 +419,7 @@ Integration tests cover what unit tests cannot:
 - 10 concurrent claimers over 300 rows with no double claims;
 - lease fencing against a zombie worker;
 - idempotent creates with 20 concurrent callers;
-- three rate-limiter instances sharing one limit, with slots spaced exactly 10.1 ms apart;
+- three rate-limiter instances sharing one limit, with slots spaced exactly one interval apart;
 - Redis pub/sub fan-out, recovery from a killed Redis connection, and prompt hub shutdown.
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs three jobs:
 - lint, including the hook tests and the alert-rule tests;

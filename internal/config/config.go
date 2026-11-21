@@ -114,6 +114,9 @@ type Worker struct {
 
 	RateLimitPerSecond float64
 	RateLimitBurst     int
+	// RateLimitMargin stretches each second's worth of rate-limit slots so sends that reach
+	// the provider with varying delays still never exceed the limit there (ADR-003).
+	RateLimitMargin time.Duration
 
 	RetryBase time.Duration
 	RetryMax  time.Duration
@@ -161,6 +164,7 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 
 		RateLimitPerSecond: float64(e.int("RATE_LIMIT_PER_SECOND", 100)),
 		RateLimitBurst:     e.int("RATE_LIMIT_BURST", 1),
+		RateLimitMargin:    e.duration("RATE_LIMIT_MARGIN", 50*time.Millisecond),
 
 		RetryBase: e.duration("RETRY_BASE", 2*time.Second),
 		RetryMax:  e.duration("RETRY_MAX", 5*time.Minute),
@@ -195,6 +199,9 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 	})
 	if cfg.RetryMax < cfg.RetryBase {
 		e.errs = append(e.errs, errors.New("RETRY_MAX must be at least RETRY_BASE"))
+	}
+	if cfg.RateLimitMargin < 0 || cfg.RateLimitMargin >= time.Second {
+		e.errs = append(e.errs, errors.New("RATE_LIMIT_MARGIN must be in [0, 1s)"))
 	}
 	// A lease shorter than the worst-case send would let the reaper hand live work to
 	// another worker and cause duplicate sends.

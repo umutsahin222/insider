@@ -46,18 +46,8 @@ redis.call('SET', KEYS[1], string.format('%.0f', next_tat), 'PX', math.ceil((nex
 return {1, wait}
 `)
 
-const (
-	// maxReservation bounds how far ahead Wait books a slot when ctx has no deadline.
-	maxReservation = time.Minute
-	// jitterAllowance stretches each second's worth of slots by this much. Slots are exact on
-	// the Redis clock, but a send reaches the provider a little after its slot (timer wake-up,
-	// scheduling, network), and that delay varies. With 100 slots exactly 10 ms apart, slot 0
-	// and slot 100 are exactly 1 s apart, so a slightly late slot 0 already puts 101 requests
-	// inside one second at the provider. Spacing slots (1 s + 10 ms) / rate apart keeps any
-	// second at the provider within the limit for delays varying by up to 10 ms, for 1 % of
-	// throughput (99/s at a limit of 100).
-	jitterAllowance = 10 * time.Millisecond
-)
+// maxReservation bounds how far ahead Wait books a slot when ctx has no deadline.
+const maxReservation = time.Minute
 
 // Limiter spaces events per key across every process that shares the same Redis.
 type Limiter struct {
@@ -68,8 +58,16 @@ type Limiter struct {
 
 // New returns a limiter allowing at most rate events in any second; burst > 1 lets that many
 // through at once after an idle period (each extra one adds to the most a second can hold).
-func New(rdb redis.Scripter, rate float64, burst int) *Limiter {
-	interval := int64(math.Ceil(float64((time.Second + jitterAllowance).Microseconds()) / rate))
+//
+// margin stretches each second's worth of slots by that much. Slots are exact on the Redis
+// clock, but a send reaches the provider a little after its slot (timer wake-up, scheduling,
+// network), and that delay varies. With 100 slots exactly 10 ms apart, slot 0 and slot 100 are
+// exactly 1 s apart, so a slightly late slot 0 already puts 101 requests inside one second at
+// the provider. Spacing slots (1 s + margin) / rate apart keeps every second at the provider
+// within the limit for delays that vary by up to margin, at the cost of margin / (1 s + margin)
+// of throughput (ADR-003).
+func New(rdb redis.Scripter, rate float64, burst int, margin time.Duration) *Limiter {
+	interval := int64(math.Ceil(float64((time.Second + max(margin, 0)).Microseconds()) / rate))
 	return &Limiter{rdb: rdb, interval: interval, tolerance: int64(max(burst-1, 0)) * interval}
 }
 

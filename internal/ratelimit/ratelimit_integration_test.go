@@ -19,6 +19,9 @@ import (
 
 var rdb *redis.Client
 
+// testMargin keeps the slot arithmetic in these tests easy to read (10.1 ms at 100/s).
+const testMargin = 10 * time.Millisecond
+
 func TestMain(m *testing.M) { os.Exit(run(m)) }
 
 func run(m *testing.M) int {
@@ -45,7 +48,7 @@ func run(m *testing.M) int {
 }
 
 func TestAllow_BurstThenDeny(t *testing.T) {
-	l := New(rdb, 10, 3)
+	l := New(rdb, 10, 3, testMargin)
 	ctx := context.Background()
 	key := t.Name()
 	for i := range 3 {
@@ -63,7 +66,7 @@ func TestAllow_BurstThenDeny(t *testing.T) {
 }
 
 func TestAllow_KeysAreIndependent(t *testing.T) {
-	l := New(rdb, 1, 1)
+	l := New(rdb, 1, 1, testMargin)
 	ctx := context.Background()
 	for _, key := range []string{t.Name() + ":sms", t.Name() + ":email"} {
 		if ok, _, _ := l.Allow(ctx, key); !ok {
@@ -76,7 +79,7 @@ func TestAllow_KeysAreIndependent(t *testing.T) {
 // requested, which is what caps every second at the rate. Slot times are read from the
 // schedule stored in Redis (on the Redis clock), so the check is exact.
 func TestReserve_SlotsAreSpacedByTheInterval(t *testing.T) {
-	l := New(rdb, 100, 1) // 10.1 ms slots: 10 ms plus the jitter allowance
+	l := New(rdb, 100, 1, testMargin) // 10.1 ms slots: 10 ms plus the margin
 	ctx := context.Background()
 	key := t.Name()
 	var slots []int64 // slot start, Redis clock, microseconds
@@ -108,16 +111,16 @@ func TestReserve_SlotsAreSpacedByTheInterval(t *testing.T) {
 	if inFirstSecond > 100 {
 		t.Errorf("%d slots start within one second, want at most 100", inFirstSecond)
 	}
-	// 101 slots span more than a second by the jitter allowance, so a send that reaches the
+	// 101 slots span more than a second by the margin, so a send that reaches the
 	// provider up to 10 ms late cannot put 101 requests inside one second there.
-	if span := time.Duration(slots[100]-slots[0]) * time.Microsecond; span < time.Second+jitterAllowance {
-		t.Errorf("101 slots span %v, want at least %v", span, time.Second+jitterAllowance)
+	if span := time.Duration(slots[100]-slots[0]) * time.Microsecond; span < time.Second+testMargin {
+		t.Errorf("101 slots span %v, want at least %v", span, time.Second+testMargin)
 	}
 }
 
 // A slot further away than the caller can wait is not booked, so it stays available.
 func TestReserve_TooFarIsNotBooked(t *testing.T) {
-	l := New(rdb, 10, 1) // 101 ms slots: 100 ms plus the jitter allowance
+	l := New(rdb, 10, 1, testMargin) // 101 ms slots: 100 ms plus the margin
 	ctx := context.Background()
 	key := t.Name()
 	if booked, _, _ := l.Reserve(ctx, key, 0); !booked {
@@ -136,7 +139,7 @@ func TestReserve_TooFarIsNotBooked(t *testing.T) {
 }
 
 func TestWait_SlotPastTheDeadlineFailsAtOnce(t *testing.T) {
-	l := New(rdb, 1, 1) // 1 s slots
+	l := New(rdb, 1, 1, testMargin) // 1 s slots
 	key := t.Name()
 	if err := l.Wait(context.Background(), key); err != nil {
 		t.Fatal(err)
@@ -166,7 +169,7 @@ func TestWait_DistributedThroughputIsCapped(t *testing.T) {
 	var admitted atomic.Int64
 	var wg sync.WaitGroup
 	for range 3 { // replicas
-		l := New(rdb, rate, burst)
+		l := New(rdb, rate, burst, testMargin)
 		for range 8 { // workers per replica
 			wg.Add(1)
 			go func() {

@@ -76,7 +76,7 @@ func run() error {
 	defer closePublisher(publisher, log) // runs before rdb.Close: workers are done publishing
 	reg := metrics.NewRegistry()
 	deliveryMetrics := metrics.NewDeliveryMetrics(reg)
-	limiter := ratelimit.New(rdb, cfg.RateLimitPerSecond, cfg.RateLimitBurst)
+	limiter := ratelimit.New(rdb, cfg.RateLimitPerSecond, cfg.RateLimitBurst, cfg.RateLimitMargin)
 	sender := provider.New(cfg.ProviderURL, cfg.ProviderTimeout, tracing)
 
 	ops := &http.Server{

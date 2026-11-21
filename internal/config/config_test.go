@@ -67,7 +67,7 @@ func TestLoadWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 || cfg.HTTPAddr != ":9091" || cfg.PollInterval != time.Second || cfg.ClaimBatchSize != 2 ||
+	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 || cfg.HTTPAddr != ":9091" || cfg.PollInterval != time.Second || cfg.ClaimBatchSize != 2 || cfg.RateLimitMargin != 50*time.Millisecond ||
 		cfg.BreakerFailures != 10 || cfg.BreakerFailureRatio != 0.5 || cfg.BreakerMinRequests != 20 {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}
@@ -91,6 +91,8 @@ func TestLoadWorker(t *testing.T) {
 		"negative provider timeout":           {"PROVIDER_TIMEOUT": "-1s"},
 		"zero shutdown timeout":               {"SHUTDOWN_TIMEOUT": "0s"},
 		"sample ratio above 1":                {"TRACE_SAMPLE_RATIO": "2"},
+		"negative rate limit margin":          {"RATE_LIMIT_MARGIN": "-1ms"},
+		"rate limit margin of a second":       {"RATE_LIMIT_MARGIN": "1s"},
 	}
 	for name, env := range tests {
 		if _, err := loadWorker(lookupFrom(env)); err == nil {

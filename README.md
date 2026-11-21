@@ -321,8 +321,9 @@ The spec leaves this to the candidate. Full reasoning is in
     `notification_circuit_breaker_state`, `notification_reaper_reclaimed_total`.
   - Labels only come from closed sets (channel, priority, outcome, route pattern, standard HTTP method or `OTHER`), never IDs or raw paths.
   - Prometheus discovers every worker replica through DNS, and ships with
-    [alert rules](deploy/prometheus/alerts.yml) for queue lag, failure rate, an open breaker and
-    unreadable queue stats.
+    [alert rules](deploy/prometheus/alerts.yml) for queue lag, failure rate, dead-lettered
+    notifications, an open breaker and unreadable queue stats. The rules have unit tests
+    (`make lint-alerts`, promtool), run in CI.
 - **Logs:** JSON (`log/slog`). Every request and delivery log line carries `correlation_id`
   (taken from `X-Correlation-ID` or generated) and `trace_id`/`span_id`; delivery lines also carry
   `notification_id`. The correlation ID is stored with the notification, so the worker's lines for
@@ -392,6 +393,7 @@ make test-unit    # fast: unit tests only
 make test         # unit + integration (testcontainers: real Postgres and Redis; Docker needed), -race
 make lint         # go vet (also with the integration and acceptance build tags) + golangci-lint
 make lint-api     # OpenAPI contract (Redocly, via Docker)
+make lint-alerts  # Prometheus alert rules and their unit tests (promtool, via Docker)
 make up && make acceptance   # black-box acceptance suite against the stack, one test per requirement
 make test-hooks   # tests for the Claude Code hooks
 make migrate-up   # migrations through the compose migrate service
@@ -408,7 +410,7 @@ Integration tests cover what unit tests cannot:
 - three rate-limiter instances sharing one limit, with slots spaced exactly 10.1 ms apart;
 - Redis pub/sub fan-out, recovery from a killed Redis connection, and prompt hub shutdown.
 CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs three jobs:
-- lint, including the hook tests;
+- lint, including the hook tests and the alert-rule tests;
 - the full test suite with `-race`;
 - an end-to-end job: it starts the compose stack, runs [`scripts/smoke.sh`](scripts/smoke.sh) and
   the acceptance suite, then scales to three workers and runs the smoke test again.

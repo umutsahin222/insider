@@ -51,7 +51,7 @@ Redis is used for the distributed rate limiter and status-event pub/sub. See `do
 ## Commands
 - `make run` – `docker compose up --build` (foreground) · `make up` – background, waits until healthy · `make down`
 - `make smoke` – end-to-end checks against a running stack (`scripts/smoke.sh`)
-- `make test` / `make test-unit` / `make lint` / `make lint-api` (OpenAPI, via Docker)
+- `make test` / `make test-unit` / `make lint` / `make lint-api` (OpenAPI, via Docker) / `make lint-alerts` (Prometheus rules + tests, via Docker)
 - `make acceptance` – acceptance suite against a running stack (one test per requirement, `test/acceptance`)
 - `make test-hooks` – tests for the Claude Code hooks · `make git-hooks` – enable the pre-push hook
 - `make migrate-up` / `make migrate-down` (via the compose `migrate` service)

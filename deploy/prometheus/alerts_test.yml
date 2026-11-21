@@ -1,0 +1,51 @@
+# Unit tests for alerts.yml: make lint-alerts (promtool test rules).
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 2 dead letters a minute on sms exceed 10 in 15 minutes; 1 every 5 minutes on email does not.
+  - interval: 1m
+    input_series:
+      - series: 'notification_deliveries_total{channel="sms", outcome="retryable_error", result="failed", instance="w1"}'
+        values: '0+2x30'
+      - series: 'notification_deliveries_total{channel="email", outcome="permanent_error", result="failed", instance="w1"}'
+        values: '0+0.2x30'
+      - series: 'notification_deliveries_total{channel="sms", outcome="success", result="sent", instance="w1"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NotificationsDeadLettered
+        exp_alerts:
+          - exp_labels: { severity: warning, channel: sms, outcome: retryable_error }
+            exp_annotations:
+              summary: "sms: 30 notifications dead-lettered (retryable_error) in 15 minutes"
+              description: >-
+                List them with GET /v1/notifications?status=failed&channel=sms and
+                re-queue with POST /v1/notifications/{id}/retry once the cause is fixed.
+
+  # Successful deliveries alone never fire it.
+  - interval: 1m
+    input_series:
+      - series: 'notification_deliveries_total{channel="push", outcome="success", result="sent", instance="w1"}'
+        values: '0+100x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: NotificationsDeadLettered
+        exp_alerts: []
+
+  # Breaker open on any replica for a minute.
+  - interval: 30s
+    input_series:
+      - series: 'notification_circuit_breaker_state{channel="email", instance="w1"}'
+        values: '0 0 2 2 2 2 2'
+      - series: 'notification_circuit_breaker_state{channel="email", instance="w2"}'
+        values: '0 0 0 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: NotificationCircuitOpen
+        exp_alerts:
+          - exp_labels: { severity: critical, channel: email }
+            exp_annotations:
+              summary: "email: circuit breaker open, deliveries paused"

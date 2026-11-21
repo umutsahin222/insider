@@ -19,6 +19,18 @@ groups:
         annotations:
           summary: "{{ $labels.channel }}: more than half of provider calls are failing"
 
+      # Dead-lettered notifications need a person: permanent_error means the provider rejected
+      # the request (bad recipient or content), retryable_error means retries ran out.
+      - alert: NotificationsDeadLettered
+        expr: |
+          sum by (channel, outcome) (increase(notification_deliveries_total{result="failed"}[15m])) > 10
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.channel }}: {{ $value | humanize }} notifications dead-lettered ({{ $labels.outcome }}) in 15 minutes"
+          description: >-
+            List them with GET /v1/notifications?status=failed&channel={{ $labels.channel }} and
+            re-queue with POST /v1/notifications/{id}/retry once the cause is fixed.
+
       - alert: NotificationCircuitOpen
         expr: max by (channel) (notification_circuit_breaker_state) == 2
         for: 1m

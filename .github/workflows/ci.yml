@@ -29,6 +29,8 @@ jobs:
           version: v2.15.0
       - name: OpenAPI contract
         run: make lint-api
+      - name: Prometheus alert rules and their tests
+        run: make lint-alerts
       - name: Claude Code hooks
         run: make test-hooks
 

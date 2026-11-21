@@ -38,6 +38,13 @@ RETURNING ...;
   since ADR-011, new work wakes workers through LISTEN/NOTIFY and polling only catches work
   falling due).
 - − Strict priority ordering can starve `low` under sustained `high` load (acceptable; aging can be added).
+- − Priority applies at claim time. A claimed row is never overtaken, so up to
+  `WORKER_CONCURRENCY × CLAIM_BATCH_SIZE` rows per worker are committed ahead of a high-priority
+  notification that arrives later. Batches therefore stay small (2 rows, about 160 ms of work per
+  loop at 100/s shared by 8 loops); large batches only save claim queries, since the rate limit,
+  not the claim, bounds throughput. *(Added 2026-11-21: with a batch of 10, the acceptance test
+  measured the last of 50 high-priority notifications at position 159 behind an earlier
+  low-priority backlog once LISTEN/NOTIFY woke every loop at the same moment.)*
 - − A queue table churns: every claim, retry and outcome rewrites the row (MVCC), leaving dead
   tuples in the table and its partial indexes. At this project's volume default autovacuum keeps
   up; at sustained high volume the table needs per-table autovacuum settings (lower scale factor,

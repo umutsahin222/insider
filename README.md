@@ -361,7 +361,7 @@ at once and the binary refuses to start.
 | `WS_ALLOWED_ORIGINS` | empty (same origin only) | API |
 | `PROVIDER_URL`, `PROVIDER_TIMEOUT` | mock provider, `5s` | worker |
 | `RATE_LIMIT_PER_SECOND`, `RATE_LIMIT_BURST` | `100`, `1` | worker |
-| `CHANNELS`, `WORKER_CONCURRENCY`, `CLAIM_BATCH_SIZE` | all, `8`, `10` | worker |
+| `CHANNELS`, `WORKER_CONCURRENCY`, `CLAIM_BATCH_SIZE` | all, `8`, `2` | worker |
 | `LEASE_DURATION`, `REAPER_INTERVAL`, `POLL_INTERVAL` | `60s`, `10s`, `1s` | worker |
 | `RETRY_BASE`, `RETRY_MAX` | `2s`, `5m` | worker |
 | `BREAKER_FAILURE_RATIO`, `BREAKER_MIN_REQUESTS`, `BREAKER_WINDOW`, `BREAKER_FAILURES`, `BREAKER_OPEN_TIMEOUT` | `0.5`, `20`, `10s`, `10`, `30s` | worker |

@@ -167,8 +167,9 @@ func TestREQ_ENG3_PriorityQueue(t *testing.T) {
 	}
 	avgHigh, avgLow := float64(highSum)/float64(highN), float64(lowSum)/float64(lowN)
 	t.Logf("first attempts: 50 high at average position %.0f (last %d), 400 earlier-queued low at %.0f", avgHigh, lastHigh, avgLow)
-	// Lows already claimed when the highs arrive (8 loops x 10 rows per worker) may go first.
-	if avgHigh >= avgLow || lastHigh > 140 {
+	// Lows already claimed when the highs arrive (8 loops x 2 rows per worker) go first, and lows
+	// claimed by loops that run out of highs interleave with the last highs: about 75 in practice.
+	if avgHigh >= avgLow || lastHigh > 100 {
 		t.Errorf("priority not honoured: high average %.0f (last %d) vs low average %.0f", avgHigh, lastHigh, avgLow)
 	}
 }

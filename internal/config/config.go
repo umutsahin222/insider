@@ -147,9 +147,12 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 		ProviderURL:     e.str("PROVIDER_URL", "http://localhost:8090/send"),
 		ProviderTimeout: e.duration("PROVIDER_TIMEOUT", 5*time.Second),
 
-		Channels:       e.channels("CHANNELS", domain.Channels),
-		Concurrency:    e.int("WORKER_CONCURRENCY", 8),
-		ClaimBatchSize: e.int("CLAIM_BATCH_SIZE", 10),
+		Channels:    e.channels("CHANNELS", domain.Channels),
+		Concurrency: e.int("WORKER_CONCURRENCY", 8),
+		// Claimed rows cannot be overtaken by higher-priority work arriving later, so a loop
+		// claims only about as much as it sends soon: at 100/s shared by 8 loops, 2 rows are
+		// ~160 ms of work (ADR-001). Larger batches save claim queries, not throughput.
+		ClaimBatchSize: e.int("CLAIM_BATCH_SIZE", 2),
 		Lease:          e.duration("LEASE_DURATION", 60*time.Second),
 		// New work wakes idle workers through LISTEN/NOTIFY (ADR-011); polling only bounds how
 		// late a scheduled time or retry backoff that falls due is noticed.

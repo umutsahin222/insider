@@ -19,6 +19,8 @@ system. It found two real bugs, a related timeout gap, and three mistakes in Cla
 expectations. Finally, those one-off checks became a repeatable layer: hooks, six auditor
 subagents with a verifier, and skills (section 7, [`claude-code-toolkit.md`](claude-code-toolkit.md)).
 The layer found real issues on `main` and caught 8 of 8 planted violations in a blind evaluation.
+A second round (section 8) closed gaps and made the system event-driven end to end, and its
+verification again found more than the code changes did.
 
 ## 1. Setting up the session
 
@@ -279,7 +281,47 @@ What this shows about working with Claude Code:
   lowered six severities and rejected half of one claim.
 - An evaluation is only as honest as its write-up of its own limits.
 
-## 8. Tools Claude installed itself (no admin rights)
+## 8. A second round: gap analysis, then architecture
+
+With the project complete, the developer asked for a gap analysis, and whether the queue design
+should change to a message broker. Claude recommended against a rewrite. The provider limit, not
+the queue, bounds throughput, and the Postgres queue's guarantees were already proven by tests.
+Instead it proposed to close the gaps and strengthen the event-driven side. The developer
+approved, with one rule: every change is justified on its own merits in the repository.
+
+The plan had three parts:
+- small gaps: SMS length by encoding, a dead-letter alert, earlier batch rejection, docs;
+- `LISTEN/NOTIFY` wake-ups ([ADR-011](adr/011-wake-workers-with-listen-notify.md));
+- a transactional outbox feeding a Redis stream, with resumable WebSocket streams
+  ([ADR-012](adr/012-status-event-outbox-and-stream.md)).
+
+The changes were small to write. The verification around them found more:
+
+| What was wrong | How it surfaced | Fix |
+|---|---|---|
+| SMS length was counted in characters whatever the alphabet, so a text with Turkish letters passed as one SMS but needs up to three UCS-2 segments | Reviewing the validation rules | GSM-7/UCS-2 segment counting, `SMS_MAX_SEGMENTS` ([ADR-004](adr/004-api-conventions.md)) |
+| Alert rules were never checked before Prometheus loaded them | Adding the dead-letter alert | `promtool` unit tests in CI (`make lint-alerts`); a broken threshold was shown to fail them |
+| After the wake-ups, the acceptance priority test failed: the last of 50 high-priority notifications came 159th behind a low-priority backlog | `make acceptance` | Waking all loops at once exposed head-of-line blocking from 10-row claim batches. Batches of 2: last high at 72 ([ADR-001](adr/001-postgres-as-queue.md)) |
+| The provider saw 101–102 requests in one second | The same acceptance run | Isolated step by step: triggers dropped, old poll interval, then a build of the previous commit. All showed it, so the host had grown noisier and 100 had always been the edge. Margin made configurable, four values measured, 50 ms chosen ([ADR-003](adr/003-rate-limiting.md)) |
+| go-redis silently retried a failed `XREAD` on a new connection, even to a restarted server, so the event hub never noticed a gap | Integration test that trims the stream and kills the connection | The hub owns a client with retries disabled ([ADR-012](adr/012-status-event-outbox-and-stream.md)) |
+| Snapshot events carried the API's clock, stream events the database's, so clients could not order them | Recording real WebSocket output for the README | Snapshots carry the row's `updated_at` |
+| A test Claude wrote for "a lost lease records no event" failed | The test itself | The scenario was wrong: a worker never writes after its own release. The test now uses the real path (lease expiry, reaper, re-claim) |
+| `make migrate-up/down` failed in Git Bash | Verifying the new migrations up, down and up | `MSYS_NO_PATHCONV` in both targets |
+
+Every new test was also run against the code with its fix removed, to show it fails there: the
+wake-up, the replay de-duplication, the batch check and the alert threshold. Measured gains are
+in the ADRs:
+- new work reaches the provider in p50 15 ms instead of 41 ms;
+- idle database commits fell from about 140 to 33 per second;
+- a 1000-event burst leaves the outbox within 0.2 s;
+- a Redis restart ends WebSocket streams with 1013 and recovers. Both were verified on the
+  running stack.
+
+The guard hook also earned its place. During a stress test it refused `docker rm` and
+`docker kill` for containers outside this project's namespace. The stress containers were
+recreated inside that namespace instead of working around the rule.
+
+## 9. Tools Claude installed itself (no admin rights)
 
 | Tool | How |
 |---|---|
@@ -294,7 +336,7 @@ Windows quirks were fixed once and recorded, not rediscovered each time. For exa
 testcontainers reaper needs a Docker socket override, now built into `make test`, and Git Bash
 needs `MSYS_NO_PATHCONV` for docker volume paths.
 
-## 9. Where the developer steered
+## 10. Where the developer steered
 
 - **Decisions:** storage and queue technology, scope (all bonuses), and the language rule: code
   and docs in English, conversation in Turkish.
@@ -306,7 +348,7 @@ needs `MSYS_NO_PATHCONV` for docker volume paths.
 - **Gates:** every push, and choosing the "right way" when it mattered ("should we install gh? do
   it however is most correct").
 
-## 10. What did not go smoothly
+## 11. What did not go smoothly
 
 - **Shell quoting:** Python patch scripts embedded in Bash heredocs sometimes failed to parse.
   Claude switched to patch scripts written to a scratch folder, applied by a helper that requires

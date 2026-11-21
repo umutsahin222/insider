@@ -15,7 +15,31 @@ WebSocket, Prometheus metrics and OpenTelemetry traces.
 - **How Claude Code is kept honest here:** hooks, six auditor subagents with a verifier, and
   measured results, in [`docs/claude-code-toolkit.md`](docs/claude-code-toolkit.md).
 
+## Reviewer's guide (10 minutes)
+
+1. **Run it.** `docker compose up --build`, then `make smoke` (under 30 s), or `make acceptance` for
+   one black-box test per requirement (about 90 s). Each test is mapped to its requirement in
+   [`test/acceptance/requirements.md`](test/acceptance/requirements.md).
+2. **Read the decisions that carry the design**, in this order:
+   - [ADR-001](docs/adr/001-postgres-as-queue.md): Postgres is the queue;
+   - [ADR-005](docs/adr/005-lease-fencing-and-db-clock.md): lease fencing and the database clock;
+   - [ADR-003](docs/adr/003-rate-limiting.md): the rate limit, measured where it matters (at
+     the provider);
+   - [ADR-012](docs/adr/012-status-event-outbox-and-stream.md): status events through a
+     transactional outbox and a Redis stream;
+   - [ADR-002](docs/adr/002-delivery-and-retry.md): retries and the circuit breaker.
+3. **Read the code where the guarantees live:**
+   - [`queue.go`](internal/store/postgres/queue.go): `SKIP LOCKED` claims and fenced transitions;
+   - [`worker.go`](internal/delivery/worker.go): `deliver`, one attempt end to end;
+   - [`ratelimit.go`](internal/ratelimit/ratelimit.go): GCRA in one Lua script;
+   - [`000007_status_event_outbox.up.sql`](migrations/000007_status_event_outbox.up.sql): the outbox
+     triggers;
+   - [`hub.go`](internal/events/hub.go): gap detection and replay.
+4. **See how it was built:** [`docs/ai-workflow.md`](docs/ai-workflow.md). It records what each
+   verification step found that the first version got wrong.
+
 ## Contents
+- [Reviewer's guide](#reviewers-guide-10-minutes)
 - [Quick start](#quick-start)
 - [Requirements coverage](#requirements-coverage)
 - [Architecture](#architecture)

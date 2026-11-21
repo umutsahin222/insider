@@ -36,5 +36,11 @@ RETURNING ...;
 - − Throughput ceiling is the DB's write capacity (~low thousands of claims/s on modest hardware —
   well above 100 msg/s × 3 channels). Polling adds small latency (mitigated by short poll interval).
 - − Strict priority ordering can starve `low` under sustained `high` load (acceptable; aging can be added).
+- − A queue table churns: every claim, retry and outcome rewrites the row (MVCC), leaving dead
+  tuples in the table and its partial indexes. At this project's volume default autovacuum keeps
+  up; at sustained high volume the table needs per-table autovacuum settings (lower scale factor,
+  higher cost limit) and finished rows should leave it, e.g. by time-partitioning and dropping old
+  partitions (README, "Limits and next steps"). Long-running transactions on the primary would
+  stall that cleanup, so analytics belong on a replica. *(Added 2026-11-21.)*
 - Migration path: if volume outgrows this, keep Postgres as the state store and add an outbox relay
   to Kafka with per-priority topics; the `delivery` package is behind a `Queue` interface.

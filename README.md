@@ -324,6 +324,14 @@ The spec leaves this to the candidate. Full reasoning is in
     [alert rules](deploy/prometheus/alerts.yml) for queue lag, failure rate, dead-lettered
     notifications, an open breaker and unreadable queue stats. The rules have unit tests
     (`make lint-alerts`, promtool), run in CI.
+- **Health:** the API (`:8080`) and every worker (`:9091`) serve two probes with different jobs.
+  - `/healthz` (liveness) answers `200` while the process can serve HTTP and checks no
+    dependency. A database outage must not make an orchestrator restart healthy processes:
+    restarts cannot fix the database, and they would drop every WebSocket client and in-flight
+    send.
+  - `/readyz` (readiness) pings Postgres and Redis (2 s timeout each) and answers `503` with the
+    failing dependency when one is down, so a load balancer stops routing to that instance until
+    it recovers. Compose health checks use `/readyz`, so services start in dependency order.
 - **Logs:** JSON (`log/slog`). Every request and delivery log line carries `correlation_id`
   (taken from `X-Correlation-ID` or generated) and `trace_id`/`span_id`; delivery lines also carry
   `notification_id`. The correlation ID is stored with the notification, so the worker's lines for
@@ -482,6 +490,7 @@ explicitly, including Prometheus registries and the tracer provider.
   queue would move to a partitioned log (Kafka, or Redis Streams) with an outbox from Postgres;
   ADR-001 describes the path.
 - **Retention:** `sent` notifications and attempt history grow forever; a partitioned table with
-  time-based drops would bound them.
+  time-based drops would bound them, and would also keep the queue's row churn (dead tuples that
+  autovacuum must clean) confined to recent partitions ([ADR-001](docs/adr/001-postgres-as-queue.md)).
 - **Per-recipient controls** (quiet hours, frequency caps, opt-out lists) would sit in the domain
   before enqueueing.

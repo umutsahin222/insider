@@ -55,6 +55,23 @@ func TestCreateNotification_FromTemplate(t *testing.T) {
 	}
 }
 
+func TestCreateBatch_OversizedRejectedBeforeTemplateLookup(t *testing.T) {
+	store := newFakeStore()
+	h := newTestServer(t, store, nil)
+	do(t, h, http.MethodPost, "/v1/templates", `{"name":"otp","channel":"sms","body":"Code {{.code}}"}`)
+	store.templateLookups = 0
+
+	item := `{"channel":"sms","recipient":"+905551234567","template":{"name":"otp","variables":{"code":"1"}}}`
+	body := `{"items":[` + strings.TrimSuffix(strings.Repeat(item+",", 1001), ",") + `]}`
+	rec := do(t, h, http.MethodPost, "/v1/notifications/batch", body)
+	if p := decode[problem](t, rec); rec.Code != http.StatusUnprocessableEntity || len(p.Errors) != 1 || p.Errors[0].Field != "items" {
+		t.Fatalf("oversized batch: %d %+v", rec.Code, p)
+	}
+	if store.templateLookups != 0 {
+		t.Errorf("template lookups = %d, want 0: an oversized batch must be rejected before any per-item work", store.templateLookups)
+	}
+}
+
 func TestCreateBatch_TemplatesResolvedOnceWithIndexedErrors(t *testing.T) {
 	store := newFakeStore()
 	h := newTestServer(t, store, nil)

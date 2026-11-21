@@ -72,6 +72,12 @@ func (a *api) createBatch(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
+	key := r.Header.Get("Idempotency-Key")
+	// Reject an oversized batch before loading templates or validating 1000+ items.
+	if err := domain.ValidateBatchEnvelope(len(req.Items), key, a.rules); err != nil {
+		a.writeError(w, r, err)
+		return
+	}
 	corrID := observability.CorrelationID(r.Context())
 	// Every item continues this request's trace, so a batch is one trace in Jaeger.
 	traceCtx := observability.InjectTraceContext(r.Context(), a.propagator)
@@ -85,7 +91,6 @@ func (a *api) createBatch(w http.ResponseWriter, r *http.Request) {
 		a.writeError(w, r, err)
 		return
 	}
-	key := r.Header.Get("Idempotency-Key")
 	batch, err := domain.NewBatch(inputs, key, a.rules, a.now())
 	if err != nil {
 		a.writeError(w, r, err)

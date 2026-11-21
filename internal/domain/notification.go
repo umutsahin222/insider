@@ -123,25 +123,33 @@ type Batch struct {
 	Notifications  []Notification
 }
 
-// NewBatch validates every item and builds the notifications of one batch.
-// It is all-or-nothing: any invalid item rejects the whole batch, and every
-// problem is reported with its item index (e.g. "items[3].recipient").
-// idempotencyKey is the optional batch-level key ("" for none).
-func NewBatch(items []CreateInput, idempotencyKey string, rules Rules, now time.Time) (Batch, error) {
+// ValidateBatchEnvelope checks what can be judged without looking at the items: their count
+// and the batch idempotency key. Callers run it before any per-item work (such as loading
+// templates), so an oversized batch is rejected before it costs anything; NewBatch runs it too.
+func ValidateBatchEnvelope(count int, idempotencyKey string, rules Rules) error {
 	ve := &ValidationError{}
 	switch {
-	case len(items) == 0:
+	case count == 0:
 		ve.add("items", "must contain at least one notification")
-	case len(items) > rules.MaxBatchSize:
+	case count > rules.MaxBatchSize:
 		ve.add("items", "must contain at most "+itoa(rules.MaxBatchSize)+" notifications")
 	}
 	if len(idempotencyKey) > rules.MaxIdempotencyKeyLength {
 		ve.add("idempotency_key", "must be at most "+itoa(rules.MaxIdempotencyKeyLength)+" bytes")
 	}
-	if err := ve.errOrNil(); err != nil {
+	return ve.errOrNil()
+}
+
+// NewBatch validates every item and builds the notifications of one batch.
+// It is all-or-nothing: any invalid item rejects the whole batch, and every
+// problem is reported with its item index (e.g. "items[3].recipient").
+// idempotencyKey is the optional batch-level key ("" for none).
+func NewBatch(items []CreateInput, idempotencyKey string, rules Rules, now time.Time) (Batch, error) {
+	if err := ValidateBatchEnvelope(len(items), idempotencyKey, rules); err != nil {
 		return Batch{}, err
 	}
 
+	ve := &ValidationError{}
 	batchID := newID()
 	out := make([]Notification, 0, len(items))
 	seenKeys := make(map[string]int, len(items))

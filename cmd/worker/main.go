@@ -19,6 +19,7 @@ import (
 
 	"github.com/umutsahin222/insider/internal/config"
 	"github.com/umutsahin222/insider/internal/delivery"
+	"github.com/umutsahin222/insider/internal/domain"
 	"github.com/umutsahin222/insider/internal/events"
 	"github.com/umutsahin222/insider/internal/metrics"
 	"github.com/umutsahin222/insider/internal/observability"
@@ -95,6 +96,14 @@ func run() error {
 	}()
 
 	var wg sync.WaitGroup
+	// New and re-queued work wakes the idle loops of its channel at once (ADR-011).
+	wake := make(map[domain.Channel]*delivery.Signal, len(cfg.Channels))
+	for _, ch := range cfg.Channels {
+		wake[ch] = delivery.NewSignal()
+	}
+	wg.Go(func() {
+		store.ListenForReadyWork(ctx, func(ch domain.Channel) { wake[ch].Notify() }, log.With("component", "listener"))
+	})
 	for _, ch := range cfg.Channels {
 		wcfg := delivery.Config{
 			Channel:      ch,
@@ -119,7 +128,7 @@ func run() error {
 		}
 		w := delivery.NewWorker(wcfg, delivery.Deps{
 			Queue: store, Sender: sender, Limiter: limiter,
-			Metrics: deliveryMetrics, Events: publisher, Tracing: tracing, Logger: log,
+			Metrics: deliveryMetrics, Events: publisher, Tracing: tracing, Logger: log, Wake: wake[ch],
 		})
 		wg.Go(func() { w.Run(ctx) })
 	}

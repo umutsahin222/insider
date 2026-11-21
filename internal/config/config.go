@@ -151,7 +151,9 @@ func loadWorker(lookup func(string) (string, bool)) (Worker, error) {
 		Concurrency:    e.int("WORKER_CONCURRENCY", 8),
 		ClaimBatchSize: e.int("CLAIM_BATCH_SIZE", 10),
 		Lease:          e.duration("LEASE_DURATION", 60*time.Second),
-		PollInterval:   e.duration("POLL_INTERVAL", 200*time.Millisecond),
+		// New work wakes idle workers through LISTEN/NOTIFY (ADR-011); polling only bounds how
+		// late a scheduled time or retry backoff that falls due is noticed.
+		PollInterval:   e.duration("POLL_INTERVAL", time.Second),
 		ReaperInterval: e.duration("REAPER_INTERVAL", 10*time.Second),
 
 		RateLimitPerSecond: float64(e.int("RATE_LIMIT_PER_SECOND", 100)),

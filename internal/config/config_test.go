@@ -67,7 +67,7 @@ func TestLoadWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 || cfg.HTTPAddr != ":9091" ||
+	if cfg.RateLimitPerSecond != 100 || len(cfg.Channels) != 3 || cfg.Concurrency != 8 || cfg.HTTPAddr != ":9091" || cfg.PollInterval != time.Second ||
 		cfg.BreakerFailures != 10 || cfg.BreakerFailureRatio != 0.5 || cfg.BreakerMinRequests != 20 {
 		t.Errorf("unexpected defaults: %+v", cfg)
 	}

@@ -14,6 +14,9 @@ Postgres is the source of truth and the work queue (ADR-001). Invariants for thi
 - The reaper's give-up rule (`attempts >= max_attempts`) is the one piece of retry policy allowed
   in SQL. It is a documented exception (ADR-005); do not add others. Business rules belong in
   `internal/domain` or `internal/delivery`.
+- Triggers on `notifications` (migration 000006) `NOTIFY notifications_ready` when rows become
+  pending and due now; `ListenForReadyWork` relays them to the workers (ADR-011). A new way of
+  making work claimable needs no Go change, but add a case to `listen_integration_test.go`.
 - Queries are parameterised (`$n`) only. Dynamic SQL may join fixed fragments, never values.
 - Schema changes go into a **new** migration (`migrations/`); a hook blocks edits to committed ones.
 - Changes here need an integration test (`//go:build integration`, testcontainers).

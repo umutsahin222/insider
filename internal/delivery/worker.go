@@ -42,11 +42,14 @@ type Limiter interface {
 
 // Config tunes one channel's worker pool.
 type Config struct {
-	Channel      domain.Channel
-	Concurrency  int           // claim/send loops for this channel
-	BatchSize    int           // rows claimed per loop iteration
-	Lease        time.Duration // how long a claim is owned before the reaper may take it back
-	PollInterval time.Duration // idle wait when the queue is empty
+	Channel     domain.Channel
+	Concurrency int           // claim/send loops for this channel
+	BatchSize   int           // rows claimed per loop iteration
+	Lease       time.Duration // how long a claim is owned before the reaper may take it back
+	// PollInterval is the idle wait when the queue is empty. It bounds how late work that
+	// nobody announces is picked up (a scheduled time or retry backoff falling due); new and
+	// re-queued work wakes idle loops at once through Deps.Wake.
+	PollInterval time.Duration
 	SendTimeout  time.Duration // per provider call
 	Retry        RetryPolicy
 	Breaker      BreakerPolicy
@@ -85,6 +88,7 @@ type Worker struct {
 	tracer     trace.Tracer
 	propagator propagation.TextMapPropagator
 	log        *slog.Logger
+	wake       *Signal
 	breaker    *gobreaker.CircuitBreaker[domain.ProviderReply]
 	randN      func(int64) int64
 	// probing is set while this process's single half-open probe is between booking a
@@ -103,6 +107,9 @@ type Deps struct {
 	// Tracing continues the trace stored with each notification; nil records nothing.
 	Tracing *observability.Tracing
 	Logger  *slog.Logger
+	// Wake fires when this channel has work that is claimable right away (ADR-011); idle
+	// loops then claim at once instead of waiting out PollInterval. Nil relies on polling.
+	Wake *Signal
 }
 
 // errRetryable marks a send the breaker should count as a failure.
@@ -126,7 +133,7 @@ func NewWorker(cfg Config, d Deps) *Worker {
 	w := &Worker{
 		cfg: cfg, queue: d.Queue, sender: d.Sender, limiter: d.Limiter, metrics: m, events: ev,
 		tracer: tracing.Provider.Tracer(observability.TracerName), propagator: tracing.Propagator,
-		log: log, randN: rand.Int64N,
+		log: log, wake: d.Wake, randN: rand.Int64N,
 	}
 	w.breaker = gobreaker.NewCircuitBreaker[domain.ProviderReply](gobreaker.Settings{
 		Name:        string(cfg.Channel),
@@ -172,6 +179,8 @@ func (w *Worker) loop(ctx context.Context) {
 			w.sleep(ctx, w.cfg.PollInterval)
 			continue
 		}
+		// Taken before the claim: a wake-up that arrives while the claim runs is not missed.
+		wake := w.wake.C()
 		// Taken before the claim, so it is never later than the lease's start on the database.
 		claimedAt := time.Now()
 		batch, err := w.queue.Claim(ctx, w.cfg.Channel, w.cfg.BatchSize, w.cfg.Lease)
@@ -183,7 +192,7 @@ func (w *Worker) loop(ctx context.Context) {
 			continue
 		}
 		if len(batch) == 0 {
-			w.sleep(ctx, w.cfg.PollInterval)
+			w.idle(ctx, wake)
 			continue
 		}
 		sendBy := w.sendDeadline(claimedAt)
@@ -402,6 +411,17 @@ func (w *Worker) releaseAll(ns []domain.Notification, delay time.Duration, reaso
 
 // sleep waits for d plus up to 20% jitter, or until ctx is done.
 func (w *Worker) sleep(ctx context.Context, d time.Duration) {
+	w.waitFor(ctx, d, nil)
+}
+
+// idle waits for new work after an empty claim: a wake-up, or PollInterval for work that
+// nobody announces (scheduled times and retry backoffs falling due).
+func (w *Worker) idle(ctx context.Context, wake <-chan struct{}) {
+	w.waitFor(ctx, w.cfg.PollInterval, wake)
+}
+
+// waitFor waits for d plus up to 20% jitter, until wake is closed, or until ctx is done.
+func (w *Worker) waitFor(ctx context.Context, d time.Duration, wake <-chan struct{}) {
 	if d <= 0 {
 		return
 	}
@@ -410,5 +430,6 @@ func (w *Worker) sleep(ctx context.Context, d time.Duration) {
 	select {
 	case <-ctx.Done():
 	case <-t.C:
+	case <-wake:
 	}
 }

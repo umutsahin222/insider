@@ -10,7 +10,7 @@ WebSocket, Prometheus metrics and OpenTelemetry traces.
 - **One command:** `docker compose up --build` starts everything, including a mock provider, so
   it runs offline.
 - **Contract:** [`api/openapi.yaml`](api/openapi.yaml) (OpenAPI 3.1, linted in CI).
-- **Decisions:** ten short ADRs in [`docs/adr/`](docs/adr/).
+- **Decisions:** short ADRs in [`docs/adr/`](docs/adr/).
 - **How it was built with Claude Code:** [`docs/ai-workflow.md`](docs/ai-workflow.md).
 - **How Claude Code is kept honest here:** hooks, six auditor subagents with a verifier, and
   measured results, in [`docs/claude-code-toolkit.md`](docs/claude-code-toolkit.md).
@@ -99,6 +99,7 @@ flowchart LR
 
     handlers -->|INSERT, one tx| pg[(PostgreSQL<br/>notifications = queue<br/>delivery_attempts, batches, templates)]
     pg -->|claim: FOR UPDATE SKIP LOCKED| worker
+    pg -. NOTIFY: new work .-> worker
 
     subgraph worker [cmd/worker, scales horizontally]
         loops[per-channel loops<br/>sms / email / push]
@@ -120,7 +121,9 @@ flowchart LR
 the unit of work. Accepting a request is a single transaction, so a message can never be stored
 but not queued, or queued but not stored, and no outbox is needed. Priority, scheduled delivery
 and retry backoff all fall out of one index ordered by `priority, next_attempt_at`. Cancellation
-and status queries read the same row the workers update. The limit is write throughput of a single
+and status queries read the same row the workers update. Workers do not have to poll for new work:
+the database announces it with `NOTIFY` on commit and idle workers claim at once
+([ADR-011](docs/adr/011-wake-workers-with-listen-notify.md)). The limit is write throughput of a single
 primary: comfortably thousands of messages per second, far above the 300/s the provider limits
 allow. [ADR-001](docs/adr/001-postgres-as-queue.md) records the trade-off and the migration path
 to a log-based broker.
@@ -157,6 +160,7 @@ stateDiagram-v2
 | [008](docs/adr/008-status-events-and-websocket.md) | Redis pub/sub as a hint channel; WebSocket = subscribe, snapshot, live |
 | [009](docs/adr/009-templates.md) | Render at creation, validate the result, restricted template language |
 | [010](docs/adr/010-packaging-and-ci.md) | One distroless image, compose with health-ordered start-up, three-job CI |
+| [011](docs/adr/011-wake-workers-with-listen-notify.md) | New work wakes idle workers through LISTEN/NOTIFY; polling only catches work falling due |
 
 ## API examples
 
@@ -358,7 +362,7 @@ at once and the binary refuses to start.
 | `PROVIDER_URL`, `PROVIDER_TIMEOUT` | mock provider, `5s` | worker |
 | `RATE_LIMIT_PER_SECOND`, `RATE_LIMIT_BURST` | `100`, `1` | worker |
 | `CHANNELS`, `WORKER_CONCURRENCY`, `CLAIM_BATCH_SIZE` | all, `8`, `10` | worker |
-| `LEASE_DURATION`, `REAPER_INTERVAL`, `POLL_INTERVAL` | `60s`, `10s`, `200ms` | worker |
+| `LEASE_DURATION`, `REAPER_INTERVAL`, `POLL_INTERVAL` | `60s`, `10s`, `1s` | worker |
 | `RETRY_BASE`, `RETRY_MAX` | `2s`, `5m` | worker |
 | `BREAKER_FAILURE_RATIO`, `BREAKER_MIN_REQUESTS`, `BREAKER_WINDOW`, `BREAKER_FAILURES`, `BREAKER_OPEN_TIMEOUT` | `0.5`, `20`, `10s`, `10`, `30s` | worker |
 

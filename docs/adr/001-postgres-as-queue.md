@@ -34,7 +34,9 @@ RETURNING ...;
 - + Single source of truth, transactional create (incl. 1000-item batches), no outbox.
 - + Simple ops: Postgres + Redis only.
 - − Throughput ceiling is the DB's write capacity (~low thousands of claims/s on modest hardware —
-  well above 100 msg/s × 3 channels). Polling adds small latency (mitigated by short poll interval).
+  well above 100 msg/s × 3 channels). Polling adds small latency (mitigated by short poll interval;
+  since ADR-011, new work wakes workers through LISTEN/NOTIFY and polling only catches work
+  falling due).
 - − Strict priority ordering can starve `low` under sustained `high` load (acceptable; aging can be added).
 - − A queue table churns: every claim, retry and outcome rewrites the row (MVCC), leaving dead
   tuples in the table and its partial indexes. At this project's volume default autovacuum keeps

@@ -11,6 +11,9 @@ Invariants for this package:
   mean the limiter is down: fail closed and release.
 - **Breaker:** while open, nothing is claimed. Claimed rows are released without consuming an
   attempt. In half-open, only the loop holding `probing` books a slot.
+- **Wake-ups:** an idle loop takes `wake.C()` *before* claiming and waits on it after an empty
+  claim (ADR-011). Taking it after the claim would lose an announcement made during the claim.
+  Polling stays as the fallback; never make a wake-up the only path to work.
 - Outcome writes run detached from shutdown (`context.WithoutCancel`), always with
   `StoreTimeout`. Any new I/O must honour a context with a deadline.
 - Every recorded outcome publishes a status event (best-effort, never blocking). A lost lease
